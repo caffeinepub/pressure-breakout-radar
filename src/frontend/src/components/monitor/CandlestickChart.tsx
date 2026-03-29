@@ -183,11 +183,10 @@ export function CandlestickChart({
     }
 
     // === SOFT LIVE-FOLLOW Y SCALE ===
-    // Compute ideal scale from all visible candles in focus window
-    const focusCandles = visible; // already sliced to focus window
+    const focusCandles = visible;
     const fMin = Math.min(...focusCandles.map((k) => k.low));
     const fMax = Math.max(...focusCandles.map((k) => k.high));
-    const fRange = Math.max(fMax - fMin, fMax * 0.0002); // guard zero range
+    const fRange = Math.max(fMax - fMin, fMax * 0.0002);
     const padding = fRange * 0.18;
     const idealPMin = fMin - padding;
     const idealPMax = fMax + padding;
@@ -199,38 +198,32 @@ export function CandlestickChart({
     let pMax: number;
 
     if (!liveModePaused) {
-      // Soft live-follow: check if current price is already in 45-62% zone
       const cPMin = stateRef.current.scalePMin;
       const cPMax = stateRef.current.scalePMax;
       if (cPMin !== 0 && cPMax !== 0) {
         const cRange = cPMax - cPMin;
         const pricePos = (anchorPrice - cPMin) / cRange;
         if (pricePos >= 0.38 && pricePos <= 0.65) {
-          // Price is comfortably in the zone — preserve current scale
           pMin = cPMin;
           pMax = cPMax;
         } else {
-          // Price drifted outside zone — recenter to ideal
           pMin = idealPMin;
           pMax = idealPMax;
           stateRef.current.scalePMin = pMin;
           stateRef.current.scalePMax = pMax;
         }
       } else {
-        // First draw — initialize scale
         pMin = idealPMin;
         pMax = idealPMax;
         stateRef.current.scalePMin = pMin;
         stateRef.current.scalePMax = pMax;
       }
     } else {
-      // Manual mode — scale from ALL visible candles (user is panning history)
       const allMin = Math.min(...visible.map((k) => k.low));
       const allMax = Math.max(...visible.map((k) => k.high));
       const allRange = Math.max(allMax - allMin, allMax * 0.0002);
       pMin = allMin - allRange * 0.12;
       pMax = allMax + allRange * 0.12;
-      // Reset stored scale so re-entering live mode recalculates
       stateRef.current.scalePMin = 0;
       stateRef.current.scalePMax = 0;
     }
@@ -322,6 +315,8 @@ export function CandlestickChart({
     }
 
     // === EXECUTION ZONES (after vacuum, before grid) ===
+    // labelsOnly=false: draw fill + border lines, skip label chips
+    // labelsOnly=true:  draw only the label chip (for second-pass z-order)
     function drawZoneBand(
       ectx: CanvasRenderingContext2D,
       priceStart: number,
@@ -331,6 +326,7 @@ export function CandlestickChart({
       label: string,
       labelColor: string,
       side: "top" | "bottom",
+      labelsOnly = false,
     ) {
       const y1 = toY(Math.max(priceStart, priceEnd));
       const y2 = toY(Math.min(priceStart, priceEnd));
@@ -340,65 +336,106 @@ export function CandlestickChart({
       const visBottom = Math.min(y2, clipBottom);
       if (visBottom <= visTop) return;
 
-      ectx.save();
-      ectx.beginPath();
-      ectx.rect(leftMargin, clipTop, chartW + 4, chartH);
-      ectx.clip();
-
-      ectx.fillStyle = fillColor;
-      ectx.fillRect(leftMargin, visTop, chartW + 4, visBottom - visTop);
-
-      ectx.strokeStyle = borderColor;
-      ectx.lineWidth = 1;
-      ectx.setLineDash([]);
-      if (y1 >= clipTop && y1 <= clipBottom) {
+      if (!labelsOnly) {
+        ectx.save();
         ectx.beginPath();
-        ectx.moveTo(leftMargin, y1);
-        ectx.lineTo(leftMargin + chartW + 4, y1);
-        ectx.stroke();
-      }
-      if (y2 >= clipTop && y2 <= clipBottom) {
-        ectx.globalAlpha = 0.4;
+        ectx.rect(leftMargin, clipTop, chartW + 4, chartH);
+        ectx.clip();
+
+        ectx.fillStyle = fillColor;
+        ectx.fillRect(leftMargin, visTop, chartW + 4, visBottom - visTop);
+
+        ectx.strokeStyle = borderColor;
+        ectx.lineWidth = 1;
+        ectx.setLineDash([]);
+        if (y1 >= clipTop && y1 <= clipBottom) {
+          ectx.beginPath();
+          ectx.moveTo(leftMargin, y1);
+          ectx.lineTo(leftMargin + chartW + 4, y1);
+          ectx.stroke();
+        }
+        if (y2 >= clipTop && y2 <= clipBottom) {
+          ectx.globalAlpha = 0.4;
+          ectx.beginPath();
+          ectx.moveTo(leftMargin, y2);
+          ectx.lineTo(leftMargin + chartW + 4, y2);
+          ectx.stroke();
+          ectx.globalAlpha = 1;
+        }
+        ectx.restore();
+      } else {
+        // Labels-only pass: draw chip badge on top of candles + bubbles
+        ectx.save();
         ectx.beginPath();
-        ectx.moveTo(leftMargin, y2);
-        ectx.lineTo(leftMargin + chartW + 4, y2);
+        ectx.rect(leftMargin, clipTop, chartW + 4, chartH);
+        ectx.clip();
+
+        // Compute label Y with clamping to avoid grid bleed
+        const rawLabelY =
+          side === "top"
+            ? Math.max(visTop + 11, clipTop + 11)
+            : Math.min(visBottom - 4, clipBottom - 11);
+        const labelY = Math.max(
+          clipTop + 11,
+          Math.min(clipBottom - 4, rawLabelY),
+        );
+
+        // Measure text for chip
+        ectx.font = "bold 9px GeistMono, monospace";
+        const textW = ectx.measureText(label).width;
+        const chipW = textW + 10;
+        const chipH = 14;
+        const chipX = leftMargin + chartW - chipW - 2;
+        const chipY = labelY - chipH / 2;
+
+        // Dark backing chip
+        ectx.globalAlpha = 0.88;
+        ectx.fillStyle = "rgba(8,16,24,0.82)";
+        ectx.beginPath();
+        ectx.roundRect(chipX, chipY, chipW, chipH, 3);
+        ectx.fill();
+
+        // Chip border (same color as zone border line)
+        ectx.strokeStyle = borderColor;
+        ectx.lineWidth = 0.8;
+        ectx.globalAlpha = 0.7;
         ectx.stroke();
-        ectx.globalAlpha = 1;
+
+        // Label text — near-full opacity
+        ectx.fillStyle = labelColor.replace(/[\d.]+\)$/, "0.97)");
+        ectx.font = "bold 9px GeistMono, monospace";
+        ectx.textAlign = "center";
+        ectx.globalAlpha = 1.0;
+        ectx.fillText(label, chipX + chipW / 2, labelY + 3.5);
+
+        ectx.restore();
       }
-
-      const labelY =
-        side === "top"
-          ? Math.max(visTop + 10, clipTop + 10)
-          : Math.min(visBottom - 3, clipBottom - 3);
-      ectx.fillStyle = labelColor;
-      ectx.font = "8px GeistMono, monospace";
-      ectx.textAlign = "right";
-      ectx.fillText(label, leftMargin + chartW, labelY);
-
-      ectx.restore();
     }
 
     const ec = stateRef.current.executionContext;
-    if (
+    const hasValidExec =
       ec?.entryBias &&
       ec.entryBias !== "NEUTRAL" &&
       (ec.executionValidityState === "VALID_LONG" ||
         ec.executionValidityState === "VALID_SHORT" ||
         ec.executionValidityState === "RECLAIM_LONG" ||
-        ec.executionValidityState === "RECLAIM_SHORT")
-    ) {
+        ec.executionValidityState === "RECLAIM_SHORT");
+
+    if (hasValidExec && ec) {
       const isLong = ec.entryBias === "LONG";
 
+      // --- FIRST PASS: fills + border lines only (no label chips) ---
       if (ec.slZone) {
         drawZoneBand(
           ctx,
           ec.slZone.start,
           ec.slZone.end,
-          isLong ? "rgba(220,60,60,0.07)" : "rgba(220,120,40,0.07)",
-          isLong ? "rgba(220,60,60,0.30)" : "rgba(220,120,40,0.30)",
+          isLong ? "rgba(220,60,60,0.10)" : "rgba(220,120,40,0.10)",
+          isLong ? "rgba(220,60,60,0.42)" : "rgba(220,120,40,0.42)",
           "SL",
           isLong ? "rgba(220,60,60,0.55)" : "rgba(220,120,40,0.55)",
           isLong ? "bottom" : "top",
+          false,
         );
       }
 
@@ -412,6 +449,7 @@ export function CandlestickChart({
           "TP2",
           isLong ? "rgba(0,180,220,0.50)" : "rgba(120,100,220,0.50)",
           isLong ? "top" : "bottom",
+          false,
         );
       }
 
@@ -420,11 +458,12 @@ export function CandlestickChart({
           ctx,
           ec.tp1Zone.start,
           ec.tp1Zone.end,
-          isLong ? "rgba(0,180,220,0.10)" : "rgba(120,80,220,0.10)",
-          isLong ? "rgba(0,180,220,0.40)" : "rgba(120,80,220,0.40)",
+          isLong ? "rgba(0,180,220,0.13)" : "rgba(120,80,220,0.13)",
+          isLong ? "rgba(0,180,220,0.55)" : "rgba(120,80,220,0.55)",
           "TP1",
           isLong ? "rgba(0,200,240,0.60)" : "rgba(140,100,240,0.60)",
           isLong ? "top" : "bottom",
+          false,
         );
       }
 
@@ -433,11 +472,12 @@ export function CandlestickChart({
           ctx,
           ec.entryZone.start,
           ec.entryZone.end,
-          isLong ? "rgba(0,200,100,0.12)" : "rgba(200,60,120,0.12)",
-          isLong ? "rgba(0,200,100,0.50)" : "rgba(200,60,120,0.50)",
+          isLong ? "rgba(0,200,100,0.16)" : "rgba(200,60,120,0.16)",
+          isLong ? "rgba(0,200,100,0.65)" : "rgba(200,60,120,0.65)",
           "ENTRY",
           isLong ? "rgba(0,220,110,0.70)" : "rgba(220,80,140,0.70)",
           "top",
+          false,
         );
       }
 
@@ -526,22 +566,9 @@ export function CandlestickChart({
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.restore();
-
-      const labelX = W - rightMargin + 6;
-      const labelText = formatPrice(lp);
-      ctx.font = "bold 10px GeistMono, monospace";
-      const measuredLabelW = ctx.measureText(labelText).width + 8;
-      const labelH = 16;
-      ctx.fillStyle = COLOR_PRICE_LABEL_BG;
-      ctx.beginPath();
-      ctx.roundRect(labelX, lpY - labelH / 2, measuredLabelW, labelH, 3);
-      ctx.fill();
-      ctx.fillStyle = COLOR_PRICE_LABEL_TEXT;
-      ctx.textAlign = "left";
-      ctx.fillText(labelText, labelX + 4, lpY + 4);
     }
 
-    // Aggression bubbles — drawn above candles, below price label
+    // === AGGRESSION BUBBLES (above candles, below price label) ===
     const bubbles = stateRef.current.aggressionBubbles;
 
     function drawBubble(
@@ -554,18 +581,19 @@ export function CandlestickChart({
     ) {
       bctx.save();
       bctx.globalAlpha = alpha;
-      bctx.shadowBlur = r * 1.4;
+      // Softer glow — suggest aggression without covering the chart
+      bctx.shadowBlur = r * 0.7;
       bctx.shadowColor =
-        side === "BUY" ? "rgba(34,197,94,0.55)" : "rgba(239,68,68,0.55)";
+        side === "BUY" ? "rgba(34,197,94,0.35)" : "rgba(239,68,68,0.35)";
       const gradient = bctx.createRadialGradient(bx, by, 0, bx, by, r);
       if (side === "BUY") {
-        gradient.addColorStop(0, "rgba(34,197,94,0.6)");
-        gradient.addColorStop(0.6, "rgba(34,197,94,0.28)");
-        gradient.addColorStop(1, "rgba(34,197,94,0.04)");
+        gradient.addColorStop(0, "rgba(34,197,94,0.48)");
+        gradient.addColorStop(0.55, "rgba(34,197,94,0.18)");
+        gradient.addColorStop(1, "rgba(34,197,94,0.02)");
       } else {
-        gradient.addColorStop(0, "rgba(239,68,68,0.6)");
-        gradient.addColorStop(0.6, "rgba(239,68,68,0.28)");
-        gradient.addColorStop(1, "rgba(239,68,68,0.04)");
+        gradient.addColorStop(0, "rgba(239,68,68,0.48)");
+        gradient.addColorStop(0.55, "rgba(239,68,68,0.18)");
+        gradient.addColorStop(1, "rgba(239,68,68,0.02)");
       }
       bctx.beginPath();
       bctx.arc(bx, by, r, 0, Math.PI * 2);
@@ -573,8 +601,8 @@ export function CandlestickChart({
       bctx.fill();
       bctx.shadowBlur = 0;
       bctx.strokeStyle =
-        side === "BUY" ? "rgba(34,197,94,0.75)" : "rgba(239,68,68,0.75)";
-      bctx.lineWidth = 0.8;
+        side === "BUY" ? "rgba(34,197,94,0.55)" : "rgba(239,68,68,0.55)";
+      bctx.lineWidth = 0.7;
       bctx.stroke();
       bctx.restore();
     }
@@ -582,37 +610,158 @@ export function CandlestickChart({
     if (bubbles.length > 0) {
       const protectRight = W - rightMargin + 6;
 
-      for (const bubble of bubbles) {
+      // Sort weakest first, strongest last (strongest renders on top)
+      const sortedBubbles = [...bubbles].sort((a, b) => a.radius - b.radius);
+
+      // Track placed bubble positions for clustering
+      const placedPositions: {
+        x: number;
+        y: number;
+        r: number;
+        side: string;
+      }[] = [];
+
+      for (const bubble of sortedBubbles) {
         const ci = visible.findIndex(
           (c) => c.openTime === bubble.candleOpenTime,
         );
         if (ci < 0) continue;
         let bx = toX(ci);
-        const by = toY(bubble.price);
         const r = bubble.radius;
 
         // Clamp bx to canvas bounds
         bx = Math.max(leftMargin + r + 2, Math.min(bx, protectRight - r - 2));
 
-        // Only shift vertically if bubble center collides with price label area
-        const nearPriceLine = Math.abs(by - lpY) < r + 12;
+        // Anchor BUY to candle body lower zone, SELL to candle body upper zone
+        const candle = visible[ci];
+        let rawBy: number;
+        if (bubble.side === "BUY") {
+          // Anchor near lower body / wick midpoint (bullish defense zone)
+          const bodyLow = Math.min(candle.open, candle.close);
+          const wickLow = candle.low;
+          const anchorPrice = bodyLow * 0.65 + wickLow * 0.35;
+          rawBy = toY(anchorPrice);
+        } else {
+          // Anchor near upper body / wick midpoint (bearish hit zone)
+          const bodyHigh = Math.max(candle.open, candle.close);
+          const wickHigh = candle.high;
+          const anchorPrice = bodyHigh * 0.65 + wickHigh * 0.35;
+          rawBy = toY(anchorPrice);
+        }
+
         // Clamp by to chart canvas bounds
         let finalBy = Math.max(
           topMargin + r + 2,
-          Math.min(by, topMargin + chartH - r - 2),
+          Math.min(rawBy, topMargin + chartH - r - 2),
         );
+
+        // Slight price-line avoidance (reduced drift)
+        const nearPriceLine = Math.abs(finalBy - lpY) < r + 6;
         if (nearPriceLine) {
-          // Shift bubble away from price line (BUY goes down, SELL goes up)
-          const shift = r + 14;
+          const shift = r + 6;
           if (bubble.side === "BUY") {
-            finalBy = Math.min(topMargin + chartH - r - 2, by + shift);
+            finalBy = Math.min(topMargin + chartH - r - 2, finalBy + shift);
           } else {
-            finalBy = Math.max(topMargin + r + 2, by - shift);
+            finalBy = Math.max(topMargin + r + 2, finalBy - shift);
           }
         }
 
-        drawBubble(ctx, bx, finalBy, r, bubble.side, 0.92);
+        // Determine if this bubble is a minor in a cluster (same side, close proximity)
+        let isMinor = false;
+        for (const placed of placedPositions) {
+          if (placed.side !== bubble.side) continue;
+          const dist = Math.sqrt(
+            (bx - placed.x) ** 2 + (finalBy - placed.y) ** 2,
+          );
+          if (dist < r + placed.r + 10) {
+            isMinor = true;
+            break;
+          }
+        }
+
+        // Minor bubbles in a cluster get reduced alpha; dominant stays full
+        const bubbleAlpha = isMinor ? 0.8 * 0.65 : 0.8;
+        drawBubble(ctx, bx, finalBy, r, bubble.side, bubbleAlpha);
+
+        placedPositions.push({ x: bx, y: finalBy, r, side: bubble.side });
       }
+    }
+
+    // === SECOND PASS: Execution zone label chips (on top of bubbles) ===
+    if (hasValidExec && ec) {
+      const isLong = ec.entryBias === "LONG";
+
+      if (ec.slZone) {
+        drawZoneBand(
+          ctx,
+          ec.slZone.start,
+          ec.slZone.end,
+          "",
+          isLong ? "rgba(220,60,60,0.42)" : "rgba(220,120,40,0.42)",
+          "SL",
+          isLong ? "rgba(220,60,60,0.55)" : "rgba(220,120,40,0.55)",
+          isLong ? "bottom" : "top",
+          true,
+        );
+      }
+
+      if (ec.tp2Zone) {
+        drawZoneBand(
+          ctx,
+          ec.tp2Zone.start,
+          ec.tp2Zone.end,
+          "",
+          isLong ? "rgba(0,160,200,0.28)" : "rgba(100,80,200,0.28)",
+          "TP2",
+          isLong ? "rgba(0,180,220,0.50)" : "rgba(120,100,220,0.50)",
+          isLong ? "top" : "bottom",
+          true,
+        );
+      }
+
+      if (ec.tp1Zone) {
+        drawZoneBand(
+          ctx,
+          ec.tp1Zone.start,
+          ec.tp1Zone.end,
+          "",
+          isLong ? "rgba(0,180,220,0.55)" : "rgba(120,80,220,0.55)",
+          "TP1",
+          isLong ? "rgba(0,200,240,0.60)" : "rgba(140,100,240,0.60)",
+          isLong ? "top" : "bottom",
+          true,
+        );
+      }
+
+      if (ec.entryZone) {
+        drawZoneBand(
+          ctx,
+          ec.entryZone.start,
+          ec.entryZone.end,
+          "",
+          isLong ? "rgba(0,200,100,0.65)" : "rgba(200,60,120,0.65)",
+          "ENTRY",
+          isLong ? "rgba(0,220,110,0.70)" : "rgba(220,80,140,0.70)",
+          "top",
+          true,
+        );
+      }
+    }
+
+    // === PRICE LABEL (topmost layer) ===
+    if (lpY >= topMargin && lpY <= topMargin + chartH) {
+      const labelX = W - rightMargin + 6;
+      const labelText = formatPrice(lp);
+      ctx.font = "bold 10px GeistMono, monospace";
+      const measuredLabelW = ctx.measureText(labelText).width + 8;
+      const labelH = 16;
+      ctx.fillStyle = COLOR_PRICE_LABEL_BG;
+      ctx.beginPath();
+      ctx.roundRect(labelX, lpY - labelH / 2, measuredLabelW, labelH, 3);
+      ctx.fill();
+      ctx.fillStyle = COLOR_PRICE_LABEL_TEXT;
+      ctx.textAlign = "left";
+      ctx.fillText(labelText, labelX + 4, lpY + 4);
     }
 
     ctx.restore();
@@ -688,7 +837,6 @@ export function CandlestickChart({
         0.3,
         Math.min(8, stateRef.current.zoom + delta),
       );
-      // Zooming does NOT pause live mode — only panning does
       scheduleRedraw();
     }
 
@@ -706,12 +854,10 @@ export function CandlestickChart({
       const candlesPerPx = visibleCount / (W * 0.85);
       const newPan = stateRef.current.dragStartPan - dx * candlesPerPx;
       stateRef.current.panOffset = newPan;
-      // Pause live mode when user pans back (pan > 1 candle threshold)
       if (newPan > 1 && !stateRef.current.liveModePaused) {
         stateRef.current.liveModePaused = true;
         setIsLivePausedRef.current(true);
       } else if (newPan <= 0.5 && stateRef.current.liveModePaused) {
-        // User panned back to the front — re-enable live mode
         stateRef.current.liveModePaused = false;
         stateRef.current.panOffset = 0;
         setIsLivePausedRef.current(false);
@@ -746,7 +892,6 @@ export function CandlestickChart({
         const candlesPerPx = visibleCount / (W * 0.85);
         const newPan = stateRef.current.dragStartPan - dx * candlesPerPx;
         stateRef.current.panOffset = newPan;
-        // Pause live mode when user pans back
         if (newPan > 1 && !stateRef.current.liveModePaused) {
           stateRef.current.liveModePaused = true;
           setIsLivePausedRef.current(true);
@@ -812,7 +957,7 @@ export function CandlestickChart({
           cursor: "crosshair",
         }}
       />
-      {/* LIVE / RECENTER button — visible when user has panned away */}
+      {/* LIVE / RECENTER button */}
       {isLivePaused && (
         <button
           type="button"
@@ -840,7 +985,7 @@ export function CandlestickChart({
           ⟳ RECENTER
         </button>
       )}
-      {/* LIVE indicator — visible when in live mode */}
+      {/* LIVE indicator */}
       {!isLivePaused && (
         <div
           style={{
