@@ -77,6 +77,33 @@ export interface BubbleDebugStats {
   volFloor: number;
 }
 
+/** Full diagnostics for the agg-trade fetch subsystem — shown in debug panel */
+export interface BubbleFetchDiagnostics {
+  /** Specific failure classification */
+  failureType?:
+    | "ABORT_ERROR"
+    | "NETWORK_ERROR"
+    | "HTTP_ERROR"
+    | "PARSE_ERROR"
+    | "EMPTY_RESPONSE";
+  /** Error constructor name (e.g. "TypeError", "AbortError") */
+  errorName?: string;
+  /** Human-readable error message */
+  errorMessage?: string;
+  /** HTTP response status code — only present for HTTP_ERROR */
+  httpStatus?: number;
+  /** The full request URL that was attempted */
+  requestUrl?: string;
+  /** Symbol passed to the agg-trade fetch */
+  symbol: string;
+  /** Timeframe active at time of fetch */
+  timeframe: string;
+  /** Timestamp (ms) of the last successful agg-trade fetch that produced bubbles */
+  lastSuccessTs: number;
+  /** Number of visible bubbles from the last successful fetch */
+  lastSuccessBubbleCount: number;
+}
+
 export type RangePosition = "LOWER" | "MID" | "UPPER";
 export type ExecutionQuality = "HIGH" | "MEDIUM" | "LOW";
 export type EntryBias = "LONG" | "SHORT" | "NEUTRAL";
@@ -103,6 +130,28 @@ export interface ExecutionContext {
   // Execution validity — set when directional math is inconsistent
   executionInvalid?: boolean;
   invalidReason?: string;
+  // Directional alignment — independent of execution validity
+  // "FULL_LONG" | "FULL_SHORT" | "CONFLICT" | "NO_CLEAR" | "LONG_LEAN" | "SHORT_LEAN"
+  directionalState: string;
+  // Execution validity — separate layer
+  // "VALID_LONG" | "VALID_SHORT"
+  // "LONG_BIAS_NO_EXEC" | "SHORT_BIAS_NO_EXEC" — invalid reward math
+  // "LONG_BIAS_NO_CLEAN_ENTRY" | "SHORT_BIAS_NO_CLEAN_ENTRY" — price too far from aggression cluster
+  // "LONG_NO_AGGRESSION_CLUSTER" | "SHORT_NO_AGGRESSION_CLUSTER" — no cluster found
+  // "NEUTRAL_LOW"
+  executionValidityState: string;
+  // No-chase: price too far from the aggression cluster
+  isNoChase?: boolean;
+  // Overhead vacuum short — vacuum above price acting as overhead resistance
+  isOverheadVacuumShort?: boolean;
+  // Whether no meaningful aggression cluster was found
+  noAggressionCluster?: boolean;
+  // Ideal short entry zone for faint chart reference in no-chase state
+  idealShortEntryZone?: ExecutionZone | null;
+  // Ideal long entry zone for faint chart reference in no-chase state
+  idealLongEntryZone?: ExecutionZone | null;
+  // Vacuum invalidation zone for faint chart reference
+  vacuumInvalidationZone?: ExecutionZone | null;
 }
 
 export interface SelectedMonitorSnapshot {
@@ -123,12 +172,17 @@ export interface SelectedMonitorSnapshot {
   bubbleLoopStatus?:
     | "BOOTSTRAPPING"
     | "FETCHING"
+    | "WS_CONNECTING"
+    | "WS_LIVE"
+    | "WS_RECONNECTING"
     | "LIVE"
     | "NO_EVENTS"
     | "RETRYING"
     | "STALE";
   bubbleRetryCount?: number;
   bubbleLastFetchCause?: string;
+  /** Full fetch diagnostics — populated whenever a fetch fails or on every tick for transparency */
+  bubbleFetchDiagnostics?: BubbleFetchDiagnostics;
   timeframe?: "1m" | "5m" | "15m";
   vacuumZone?: VacuumZone;
   executionContext?: ExecutionContext;

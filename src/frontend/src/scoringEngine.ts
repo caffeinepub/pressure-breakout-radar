@@ -1,4 +1,5 @@
 import type {
+  AggressionBubble,
   Kline,
   Phase,
   PressureResult,
@@ -269,19 +270,53 @@ function computeATR(klines: Kline[], period = 14): number {
   return totalTR / (recent.length - 1);
 }
 
+// ---------------------------------------------------------------------------
+// AGGRESSION CLUSTER FINDER
+// Finds the dominant aggression cluster from recent bubbles.
+// Returns the weighted center price, strength, and price range of the cluster.
+// ---------------------------------------------------------------------------
+interface AggressionCluster {
+  centerPrice: number;
+  strength: number;
+  lowPrice: number;
+  highPrice: number;
+}
+
+function findAggressionCluster(
+  bubbles: AggressionBubble[],
+  side: "BUY" | "SELL",
+  atr: number,
+): AggressionCluster | null {
+  const relevant = bubbles.filter((b) => b.side === side);
+  if (relevant.length === 0) return null;
+
+  // Anchor to the strongest bubble
+  const strongest = relevant.reduce((best, b) =>
+    b.strength > best.strength ? b : best,
+  );
+
+  // Cluster = all bubbles within 2 ATR of the strongest
+  const clusterRadius = Math.max(atr * 2.0, strongest.price * 0.003);
+  const cluster = relevant.filter(
+    (b) => Math.abs(b.price - strongest.price) <= clusterRadius,
+  );
+  if (cluster.length === 0) return null;
+
+  const totalStrength = cluster.reduce((s, b) => s + b.strength, 0);
+  if (totalStrength === 0) return null;
+
+  const centerPrice =
+    cluster.reduce((s, b) => s + b.price * b.strength, 0) / totalStrength;
+  const maxStrength = Math.max(...cluster.map((b) => b.strength));
+  const lowPrice = Math.min(...cluster.map((b) => b.price));
+  const highPrice = Math.max(...cluster.map((b) => b.price));
+
+  return { centerPrice, strength: maxStrength, lowPrice, highPrice };
+}
+
 /**
  * Validates the computed execution zones for directional and mathematical
  * consistency. Returns null if valid, or a string reason if invalid.
- *
- * LONG rules:
- *   - SL must be below entry (positive R)
- *   - TP1 mid must be strictly above entry zone top
- *   - TP2 mid (if present) must be strictly above TP1 mid
- *
- * SHORT rules:
- *   - SL must be above entry (positive R)
- *   - TP1 mid must be strictly below entry zone bottom
- *   - TP2 mid (if present) must be strictly below TP1 mid
  */
 function validateExecutionZones(
   bias: EntryBias,
@@ -295,40 +330,22 @@ function validateExecutionZones(
   const tp1Mid = (tp1Zone.start + tp1Zone.end) / 2;
 
   if (bias === "LONG") {
-    // SL must be below entry mid — positive R required
-    if (slMid >= entryMid) {
-      return "NO VALID LONG REWARD PATH";
-    }
-    // TP1 must be above the entry zone top (not just entry mid)
-    if (tp1Mid <= entryZone.end) {
-      return "INVALID LONG EXECUTION";
-    }
-    // TP2 (if present) must be above TP1
+    if (slMid >= entryMid) return "NO VALID LONG REWARD PATH";
+    if (tp1Mid <= entryZone.end) return "INVALID LONG EXECUTION";
     if (tp2Zone !== null) {
       const tp2Mid = (tp2Zone.start + tp2Zone.end) / 2;
-      if (tp2Mid <= tp1Mid) {
-        return "INVALID LONG EXECUTION";
-      }
+      if (tp2Mid <= tp1Mid) return "INVALID LONG EXECUTION";
     }
   } else if (bias === "SHORT") {
-    // SL must be above entry mid — positive R required
-    if (slMid <= entryMid) {
-      return "NO VALID SHORT REWARD PATH";
-    }
-    // TP1 must be below the entry zone bottom (not just entry mid)
-    if (tp1Mid >= entryZone.start) {
-      return "INVALID SHORT EXECUTION";
-    }
-    // TP2 (if present) must be below TP1
+    if (slMid <= entryMid) return "NO VALID SHORT REWARD PATH";
+    if (tp1Mid >= entryZone.start) return "INVALID SHORT EXECUTION";
     if (tp2Zone !== null) {
       const tp2Mid = (tp2Zone.start + tp2Zone.end) / 2;
-      if (tp2Mid >= tp1Mid) {
-        return "INVALID SHORT EXECUTION";
-      }
+      if (tp2Mid >= tp1Mid) return "INVALID SHORT EXECUTION";
     }
   }
 
-  return null; // valid
+  return null;
 }
 
 export function computeExecutionContext(
@@ -339,6 +356,7 @@ export function computeExecutionContext(
   pressure: PressureResult,
   pressureTrend: TrendDirection,
   tensionTrend: TrendDirection,
+  aggressionBubbles: AggressionBubble[] = [],
 ): ExecutionContext {
   const { upperStructure, lowerStructure, bias } = breakoutContext;
   const rangeSpan = Math.max(
@@ -352,6 +370,9 @@ export function computeExecutionContext(
   const rangePosition: RangePosition =
     rangeValue <= 0.33 ? "LOWER" : rangeValue <= 0.66 ? "MID" : "UPPER";
 
+  // ---------------------------------------------------------------------------
+  // SIGNAL SCORING
+  // ---------------------------------------------------------------------------
   const longSignals = [
     bias === "UP",
     vacuumZone.side === "ABOVE",
@@ -362,7 +383,8 @@ export function computeExecutionContext(
   ];
   const shortSignals = [
     bias === "DOWN",
-    vacuumZone.side === "BELOW",
+    vacuumZone.side === "BELOW" ||
+      (vacuumZone.side === "ABOVE" && bias === "DOWN"),
     rangePosition === "LOWER",
     pressure.side === "DOWN",
     pressureTrend === "RISING",
@@ -370,6 +392,18 @@ export function computeExecutionContext(
   ];
   const longScore = longSignals.filter(Boolean).length;
   const shortScore = shortSignals.filter(Boolean).length;
+
+  // Directional state — independent of execution validity
+  let directionalState: string;
+  if (longScore >= 5) directionalState = "FULL_LONG";
+  else if (shortScore >= 5) directionalState = "FULL_SHORT";
+  else if (longScore >= 3 && longScore >= shortScore)
+    directionalState = "LONG_LEAN";
+  else if (shortScore >= 3 && shortScore > longScore)
+    directionalState = "SHORT_LEAN";
+  else if (Math.abs(longScore - shortScore) <= 1 && longScore >= 2)
+    directionalState = "CONFLICT";
+  else directionalState = "NO_CLEAR";
 
   let entryBias: EntryBias = "NEUTRAL";
   let alignmentScore = 0;
@@ -383,7 +417,6 @@ export function computeExecutionContext(
     alignmentScore = Math.max(longScore, shortScore);
   }
 
-  // Base quality from alignment signals
   let executionQuality: ExecutionQuality =
     alignmentScore >= 6 ? "HIGH" : alignmentScore >= 4 ? "MEDIUM" : "LOW";
   const hasCleanEntry = entryBias !== "NEUTRAL";
@@ -396,116 +429,280 @@ export function computeExecutionContext(
   let rMultiple = 0;
   let executionInvalid = false;
   let invalidReason: string | undefined;
+  // No-chase state — price is too far from the aggression cluster
+  let isNoChase = false;
+  let isOverheadVacuumShort = false;
+  let idealShortEntryZone: ExecutionZone | null = null;
+  let idealLongEntryZone: ExecutionZone | null = null;
+  let vacuumInvalidationZone: ExecutionZone | null = null;
+  // Whether there was no meaningful aggression cluster
+  let noAggressionCluster = false;
 
   if (hasCleanEntry) {
     const atr = computeATR(klines);
-    const zoneHalfWidth = Math.max(atr * 0.35, currentPrice * 0.0008);
-    const recent20 = klines.slice(-20);
 
     if (entryBias === "LONG") {
-      entryZone = {
-        start: upperStructure - zoneHalfWidth * 0.4,
-        end: upperStructure + zoneHalfWidth * 1.2,
-      };
-      const localLow = Math.min(...recent20.map((k) => k.low));
-      slZone = { start: localLow - atr * 0.25, end: localLow + atr * 0.15 };
-      const entryMid = (entryZone.start + entryZone.end) / 2;
-      const slMid = (slZone.start + slZone.end) / 2;
-      const R = Math.max(entryMid - slMid, entryMid * 0.002);
+      // =======================================================================
+      // LONG EXECUTION — entry anchored to bullish aggression cluster
+      // SL anchored to vacuum invalidation / cluster support
+      // =======================================================================
+      const bullishCluster = findAggressionCluster(
+        aggressionBubbles,
+        "BUY",
+        atr,
+      );
 
-      // TP1: vacuum midpoint or 1R above entry
-      const rawTp1Price =
-        vacuumZone.side === "ABOVE" && vacuumZone.startPrice > 0
-          ? (vacuumZone.startPrice + vacuumZone.endPrice) / 2
-          : entryMid + R;
-      // Ensure TP1 is always above entry zone top for a valid LONG
-      const tp1Price = Math.max(rawTp1Price, entryZone.end + atr * 0.3);
-      tp1Zone = { start: tp1Price - atr * 0.2, end: tp1Price + atr * 0.2 };
-      rMultiple = (tp1Price - entryMid) / R;
-
-      // TP2: 1:3 rational model — null if structure doesn't support it
-      const tp2_3R = entryMid + R * 3;
-      const vacuumEnd =
-        vacuumZone.side === "ABOVE" && vacuumZone.endPrice > 0
-          ? vacuumZone.endPrice
-          : 0;
-
-      if (vacuumEnd >= entryMid + R * 2.5) {
-        const tp2Price = Math.min(tp2_3R, vacuumEnd);
-        // TP2 must be above TP1
-        if (tp2Price > tp1Price) {
-          tp2Zone = { start: tp2Price - atr * 0.2, end: tp2Price + atr * 0.2 };
-          rMultiple = (tp2Price - entryMid) / R;
-        }
-      } else if (vacuumEnd >= entryMid + R * 1.5 && vacuumEnd > tp1Price) {
-        tp2Zone = { start: vacuumEnd - atr * 0.2, end: vacuumEnd + atr * 0.2 };
-        rMultiple = (vacuumEnd - entryMid) / R;
-        structurallyLimited = true;
-        if (executionQuality === "HIGH") executionQuality = "MEDIUM";
+      if (!bullishCluster || bullishCluster.strength < 8) {
+        // No meaningful bullish aggression cluster found
+        noAggressionCluster = true;
       } else {
-        tp2Zone = null;
-        structurallyLimited = true;
-        if (executionQuality === "HIGH") executionQuality = "MEDIUM";
+        // Build entry zone around the cluster
+        const spread = Math.max(
+          bullishCluster.highPrice - bullishCluster.lowPrice,
+          atr * 0.2,
+        );
+        const zoneHalf = Math.max(atr * 0.3, spread / 2 + atr * 0.1);
+
+        idealLongEntryZone = {
+          start: bullishCluster.centerPrice - zoneHalf,
+          end: bullishCluster.centerPrice + zoneHalf,
+        };
+
+        // NO-CHASE RULE: if price has run too far above the cluster, don't chase
+        const noChaseLong =
+          currentPrice > bullishCluster.centerPrice + atr * 1.5;
+
+        if (noChaseLong) {
+          isNoChase = true;
+          // idealLongEntryZone is stored for faint chart reference
+        } else {
+          entryZone = idealLongEntryZone;
+
+          // SL: below the cluster support with vacuum invalidation buffer
+          // Use vacuum lower edge if vacuum is ABOVE (downside invalidation)
+          // Otherwise use the cluster bottom as support reference
+          const clusterSupport = bullishCluster.lowPrice;
+          const slBase =
+            vacuumZone.side === "ABOVE" && vacuumZone.startPrice > currentPrice
+              ? Math.min(clusterSupport, vacuumZone.startPrice - atr * 0.3)
+              : clusterSupport;
+
+          slZone = {
+            start: slBase - atr * 0.55,
+            end: slBase - atr * 0.05,
+          };
+
+          const entryMid = (entryZone.start + entryZone.end) / 2;
+          const slMid = (slZone.start + slZone.end) / 2;
+          const R = Math.max(entryMid - slMid, entryMid * 0.002);
+
+          // TP1: vacuum midpoint or 1R above entry
+          const rawTp1Price =
+            vacuumZone.side === "ABOVE" && vacuumZone.startPrice > 0
+              ? (vacuumZone.startPrice + vacuumZone.endPrice) / 2
+              : entryMid + R;
+          const tp1Price = Math.max(rawTp1Price, entryZone.end + atr * 0.3);
+          tp1Zone = { start: tp1Price - atr * 0.2, end: tp1Price + atr * 0.2 };
+          rMultiple = (tp1Price - entryMid) / R;
+
+          // TP2: rational 3R target supported by vacuum
+          const tp2_3R = entryMid + R * 3;
+          const vacuumEnd =
+            vacuumZone.side === "ABOVE" && vacuumZone.endPrice > 0
+              ? vacuumZone.endPrice
+              : 0;
+
+          if (vacuumEnd >= entryMid + R * 2.5) {
+            const tp2Price = Math.min(tp2_3R, vacuumEnd);
+            if (tp2Price > tp1Price) {
+              tp2Zone = {
+                start: tp2Price - atr * 0.2,
+                end: tp2Price + atr * 0.2,
+              };
+              rMultiple = (tp2Price - entryMid) / R;
+            }
+          } else if (vacuumEnd >= entryMid + R * 1.5 && vacuumEnd > tp1Price) {
+            tp2Zone = {
+              start: vacuumEnd - atr * 0.2,
+              end: vacuumEnd + atr * 0.2,
+            };
+            rMultiple = (vacuumEnd - entryMid) / R;
+            structurallyLimited = true;
+            if (executionQuality === "HIGH") executionQuality = "MEDIUM";
+          } else {
+            tp2Zone = null;
+            structurallyLimited = true;
+            if (executionQuality === "HIGH") executionQuality = "MEDIUM";
+          }
+        }
       }
     } else {
-      // SHORT
-      entryZone = {
-        start: lowerStructure - zoneHalfWidth * 1.2,
-        end: lowerStructure + zoneHalfWidth * 0.4,
-      };
-      const localHigh = Math.max(...recent20.map((k) => k.high));
-      slZone = { start: localHigh - atr * 0.15, end: localHigh + atr * 0.25 };
-      const entryMid = (entryZone.start + entryZone.end) / 2;
-      const slMid = (slZone.start + slZone.end) / 2;
-      const R = Math.max(slMid - entryMid, entryMid * 0.002);
+      // =======================================================================
+      // SHORT EXECUTION — entry anchored to bearish aggression cluster
+      // SL anchored to vacuum invalidation
+      // =======================================================================
+      isOverheadVacuumShort =
+        vacuumZone.side === "ABOVE" && vacuumZone.startPrice > 0;
 
-      // TP1: vacuum midpoint or 1R below entry
-      const rawTp1Price =
-        vacuumZone.side === "BELOW" && vacuumZone.startPrice > 0
-          ? (vacuumZone.startPrice + vacuumZone.endPrice) / 2
-          : entryMid - R;
-      // Ensure TP1 is always below entry zone bottom for a valid SHORT
-      const tp1Price = Math.min(rawTp1Price, entryZone.start - atr * 0.3);
-      tp1Zone = { start: tp1Price - atr * 0.2, end: tp1Price + atr * 0.2 };
-      rMultiple = (entryMid - tp1Price) / R;
+      const bearishCluster = findAggressionCluster(
+        aggressionBubbles,
+        "SELL",
+        atr,
+      );
 
-      // TP2: 1:3 rational model — null if structure doesn't support it
-      const tp2_3R = entryMid - R * 3;
-      const vacuumEnd =
-        vacuumZone.side === "BELOW" && vacuumZone.endPrice > 0
-          ? vacuumZone.endPrice
-          : 0;
-
-      if (vacuumEnd > 0 && vacuumEnd <= entryMid - R * 2.5) {
-        const tp2Price = Math.max(tp2_3R, vacuumEnd);
-        // TP2 must be below TP1
-        if (tp2Price < tp1Price) {
-          tp2Zone = { start: tp2Price - atr * 0.2, end: tp2Price + atr * 0.2 };
-          rMultiple = (entryMid - tp2Price) / R;
-        }
-      } else if (
-        vacuumEnd > 0 &&
-        vacuumEnd <= entryMid - R * 1.5 &&
-        vacuumEnd < tp1Price
-      ) {
-        tp2Zone = { start: vacuumEnd - atr * 0.2, end: vacuumEnd + atr * 0.2 };
-        rMultiple = (entryMid - vacuumEnd) / R;
-        structurallyLimited = true;
-        if (executionQuality === "HIGH") executionQuality = "MEDIUM";
+      if (!bearishCluster || bearishCluster.strength < 8) {
+        // No meaningful bearish aggression cluster found
+        noAggressionCluster = true;
       } else {
-        tp2Zone = null;
-        structurallyLimited = true;
-        if (executionQuality === "HIGH") executionQuality = "MEDIUM";
+        // Build entry zone around the cluster
+        const spread = Math.max(
+          bearishCluster.highPrice - bearishCluster.lowPrice,
+          atr * 0.2,
+        );
+        const zoneHalf = Math.max(atr * 0.3, spread / 2 + atr * 0.1);
+
+        if (isOverheadVacuumShort) {
+          // -------------------------------------------------------------------
+          // OVERHEAD VACUUM SHORT
+          // Entry: bearish aggression cluster (rejection zone)
+          // SL: above vacuum top (overhead vacuum invalidation)
+          // -------------------------------------------------------------------
+          const clusterEntryZone: ExecutionZone = {
+            start: bearishCluster.centerPrice - zoneHalf,
+            end: bearishCluster.centerPrice + zoneHalf,
+          };
+
+          // Keep ideal entry zone for faint reference
+          idealShortEntryZone = clusterEntryZone;
+
+          // SL: above vacuum top + buffer (overhead vacuum invalidation)
+          const slBase = vacuumZone.endPrice;
+          const computedSlZone: ExecutionZone = {
+            start: slBase,
+            end: slBase + atr * 0.5,
+          };
+          vacuumInvalidationZone = computedSlZone;
+
+          // NO-CHASE RULE: if price already extended well below the cluster
+          const noChasePriceThreshold = bearishCluster.centerPrice - atr * 1.5;
+          if (currentPrice < noChasePriceThreshold) {
+            isNoChase = true;
+          } else {
+            entryZone = clusterEntryZone;
+            slZone = computedSlZone;
+
+            const entryMid = (entryZone.start + entryZone.end) / 2;
+            const slMid = (slZone.start + slZone.end) / 2;
+            const R = Math.max(slMid - entryMid, entryMid * 0.002);
+
+            const rawTp1Price = entryMid - R;
+            const tp1Price = Math.min(rawTp1Price, entryZone.start - atr * 0.3);
+            tp1Zone = {
+              start: tp1Price - atr * 0.2,
+              end: tp1Price + atr * 0.2,
+            };
+            rMultiple = (entryMid - tp1Price) / R;
+
+            const tp2_3R = entryMid - R * 3;
+            const tp1Mid = (tp1Zone.start + tp1Zone.end) / 2;
+            if (tp2_3R < tp1Mid) {
+              tp2Zone = {
+                start: tp2_3R - atr * 0.2,
+                end: tp2_3R + atr * 0.2,
+              };
+              rMultiple = (entryMid - tp2_3R) / R;
+            } else {
+              structurallyLimited = true;
+              if (executionQuality === "HIGH") executionQuality = "MEDIUM";
+            }
+          }
+        } else {
+          // -------------------------------------------------------------------
+          // STANDARD SHORT (vacuum below or none)
+          // Entry: bearish aggression cluster
+          // SL: above the cluster top with buffer
+          // -------------------------------------------------------------------
+          const clusterEntryZone: ExecutionZone = {
+            start: bearishCluster.centerPrice - zoneHalf,
+            end: bearishCluster.centerPrice + zoneHalf,
+          };
+          idealShortEntryZone = clusterEntryZone;
+
+          // NO-CHASE RULE: if price already dumped far below the cluster
+          const noChaseShort =
+            currentPrice < bearishCluster.centerPrice - atr * 1.5;
+
+          if (noChaseShort) {
+            isNoChase = true;
+          } else {
+            entryZone = clusterEntryZone;
+
+            // SL: above the cluster top with ATR buffer (cluster resistance becomes invalidation)
+            const slBase = bearishCluster.highPrice;
+            slZone = {
+              start: slBase + atr * 0.05,
+              end: slBase + atr * 0.55,
+            };
+
+            const entryMid = (entryZone.start + entryZone.end) / 2;
+            const slMid = (slZone.start + slZone.end) / 2;
+            const R = Math.max(slMid - entryMid, entryMid * 0.002);
+
+            // TP1: vacuum midpoint or 1R below entry
+            const rawTp1Price =
+              vacuumZone.side === "BELOW" && vacuumZone.startPrice > 0
+                ? (vacuumZone.startPrice + vacuumZone.endPrice) / 2
+                : entryMid - R;
+            const tp1Price = Math.min(rawTp1Price, entryZone.start - atr * 0.3);
+            tp1Zone = {
+              start: tp1Price - atr * 0.2,
+              end: tp1Price + atr * 0.2,
+            };
+            rMultiple = (entryMid - tp1Price) / R;
+
+            // TP2: rational 3R target
+            const tp2_3R = entryMid - R * 3;
+            const vacuumEnd =
+              vacuumZone.side === "BELOW" && vacuumZone.endPrice > 0
+                ? vacuumZone.endPrice
+                : 0;
+
+            if (vacuumEnd > 0 && vacuumEnd <= entryMid - R * 2.5) {
+              const tp2Price = Math.max(tp2_3R, vacuumEnd);
+              if (tp2Price < tp1Price) {
+                tp2Zone = {
+                  start: tp2Price - atr * 0.2,
+                  end: tp2Price + atr * 0.2,
+                };
+                rMultiple = (entryMid - tp2Price) / R;
+              }
+            } else if (
+              vacuumEnd > 0 &&
+              vacuumEnd <= entryMid - R * 1.5 &&
+              vacuumEnd < tp1Price
+            ) {
+              tp2Zone = {
+                start: vacuumEnd - atr * 0.2,
+                end: vacuumEnd + atr * 0.2,
+              };
+              rMultiple = (entryMid - vacuumEnd) / R;
+              structurallyLimited = true;
+              if (executionQuality === "HIGH") executionQuality = "MEDIUM";
+            } else {
+              tp2Zone = null;
+              structurallyLimited = true;
+              if (executionQuality === "HIGH") executionQuality = "MEDIUM";
+            }
+          }
+        }
       }
     }
 
     // -----------------------------------------------------------------------
-    // STRICT DIRECTIONAL VALIDATION
-    // After computing all zones, verify they are mathematically consistent.
-    // A setup may be directionally aligned but still invalid for execution.
-    // If invalid: null all zones, mark executionInvalid, downgrade quality.
+    // STRICT DIRECTIONAL VALIDATION (only for active execution zones)
+    // Skip if in no-chase state or no aggression cluster
     // -----------------------------------------------------------------------
-    if (entryZone && slZone && tp1Zone) {
+    if (!isNoChase && !noAggressionCluster && entryZone && slZone && tp1Zone) {
       const validationError = validateExecutionZones(
         entryBias,
         entryZone,
@@ -516,12 +713,10 @@ export function computeExecutionContext(
       if (validationError !== null) {
         executionInvalid = true;
         invalidReason = validationError;
-        // Do NOT draw contradictory overlay zones on the chart
         entryZone = null;
         slZone = null;
         tp1Zone = null;
         tp2Zone = null;
-        // Downgrade quality aggressively
         if (executionQuality === "HIGH" || executionQuality === "MEDIUM") {
           executionQuality = "LOW";
         }
@@ -529,30 +724,126 @@ export function computeExecutionContext(
         structurallyLimited = false;
       }
     }
+
+    // Hard minimum reward validation — TP1 must be >= 1.0R
+    const MIN_TP1_R = 1.0;
+    if (
+      !isNoChase &&
+      !noAggressionCluster &&
+      !executionInvalid &&
+      tp1Zone &&
+      entryZone &&
+      slZone
+    ) {
+      const entryMid2 = (entryZone.start + entryZone.end) / 2;
+      const slMid2 = (slZone.start + slZone.end) / 2;
+      const R2 =
+        entryBias === "LONG"
+          ? Math.max(entryMid2 - slMid2, entryMid2 * 0.002)
+          : Math.max(slMid2 - entryMid2, entryMid2 * 0.002);
+      const tp1Mid2 = (tp1Zone.start + tp1Zone.end) / 2;
+      const tp1R =
+        entryBias === "LONG"
+          ? (tp1Mid2 - entryMid2) / R2
+          : (entryMid2 - tp1Mid2) / R2;
+
+      if (tp1R < MIN_TP1_R) {
+        executionInvalid = true;
+        invalidReason =
+          tp1R < 0.5
+            ? "Reward path too small for execution"
+            : "TP1 below minimum 1R threshold";
+        entryZone = null;
+        slZone = null;
+        tp1Zone = null;
+        tp2Zone = null;
+        rMultiple = 0;
+        structurallyLimited = false;
+        if (executionQuality !== "LOW") executionQuality = "LOW";
+      }
+    }
   }
 
-  // Interpretation line — respects invalid state
+  // ---------------------------------------------------------------------------
+  // EXECUTION VALIDITY STATE RESOLUTION
+  // Priority: no-chase > no-cluster > invalid > valid > neutral
+  // ---------------------------------------------------------------------------
+  let executionValidityState: string;
+  if (noAggressionCluster && entryBias === "LONG") {
+    executionValidityState = "LONG_NO_AGGRESSION_CLUSTER";
+  } else if (noAggressionCluster && entryBias === "SHORT") {
+    executionValidityState = "SHORT_NO_AGGRESSION_CLUSTER";
+  } else if (isNoChase && entryBias === "LONG") {
+    executionValidityState = "LONG_BIAS_NO_CLEAN_ENTRY";
+  } else if (isNoChase && entryBias === "SHORT") {
+    executionValidityState = "SHORT_BIAS_NO_CLEAN_ENTRY";
+  } else if (!executionInvalid && entryBias === "LONG" && entryZone !== null) {
+    executionValidityState = "VALID_LONG";
+  } else if (!executionInvalid && entryBias === "SHORT" && entryZone !== null) {
+    executionValidityState = "VALID_SHORT";
+  } else if (executionInvalid && entryBias === "LONG") {
+    executionValidityState = "LONG_BIAS_NO_EXEC";
+  } else if (executionInvalid && entryBias === "SHORT") {
+    executionValidityState = "SHORT_BIAS_NO_EXEC";
+  } else {
+    executionValidityState = "NEUTRAL_LOW";
+  }
+
+  // ---------------------------------------------------------------------------
+  // INTERPRETATION LINE — aggression-anchored language
+  // ---------------------------------------------------------------------------
   let interpretationLine: string;
-  if (executionInvalid && invalidReason) {
-    interpretationLine = `${invalidReason} — alignment present but structure fails execution math`;
-  } else if (structurallyLimited && hasCleanEntry) {
-    const rmStr = rMultiple.toFixed(1);
-    if (entryBias === "LONG") {
-      interpretationLine = `Long leaning — structure limits reward path (~${rmStr}R achievable)`;
+  if (
+    executionValidityState === "LONG_NO_AGGRESSION_CLUSTER" ||
+    executionValidityState === "SHORT_NO_AGGRESSION_CLUSTER"
+  ) {
+    interpretationLine =
+      "No clean aggression cluster detected — directional bias exists but no entry zone";
+  } else if (executionValidityState === "LONG_BIAS_NO_CLEAN_ENTRY") {
+    interpretationLine =
+      "Directional bias valid, but price is too far from the bullish aggression zone — wait for re-entry";
+  } else if (executionValidityState === "SHORT_BIAS_NO_CLEAN_ENTRY") {
+    if (isOverheadVacuumShort) {
+      interpretationLine =
+        "Overhead vacuum supports short bias, but price too far from aggression zone — wait for retest";
     } else {
-      interpretationLine = `Short leaning — structure limits reward path (~${rmStr}R achievable)`;
+      interpretationLine =
+        "Price already extended below bearish aggression zone — short bias intact, wait for re-entry";
     }
-  } else if (executionQuality === "HIGH" && entryBias === "LONG") {
+  } else if (executionValidityState === "LONG_BIAS_NO_EXEC") {
+    interpretationLine = invalidReason
+      ? `Long bias via aggression cluster — ${invalidReason}`
+      : "Long bias via aggression exists, but no valid reward path";
+  } else if (executionValidityState === "SHORT_BIAS_NO_EXEC") {
+    interpretationLine = invalidReason
+      ? `Short bias via aggression cluster — ${invalidReason}`
+      : "Short bias via aggression exists, but structure does not support execution";
+  } else if (executionValidityState === "VALID_LONG") {
+    if (structurallyLimited) {
+      interpretationLine = `Long entry supported by bullish aggression cluster — structure limits path (~${rMultiple.toFixed(1)}R)`;
+    } else if (executionQuality === "HIGH") {
+      interpretationLine =
+        "Long entry supported by bullish aggression cluster — aggression confirms continuation, vacuum defines path";
+    } else {
+      interpretationLine =
+        "Long entry anchored to bullish aggression cluster — vacuum and pressure mostly aligned";
+    }
+  } else if (executionValidityState === "VALID_SHORT") {
+    if (isOverheadVacuumShort) {
+      interpretationLine =
+        "Short entry supported by bearish aggression cluster — vacuum defines invalidation above";
+    } else if (structurallyLimited) {
+      interpretationLine = `Short entry supported by bearish aggression cluster — structure limits path (~${rMultiple.toFixed(1)}R)`;
+    } else if (executionQuality === "HIGH") {
+      interpretationLine =
+        "Short entry supported by bearish aggression cluster — aggression confirms continuation, vacuum defines invalidation";
+    } else {
+      interpretationLine =
+        "Short entry anchored to bearish aggression cluster — vacuum and pressure mostly aligned";
+    }
+  } else if (directionalState === "CONFLICT") {
     interpretationLine =
-      "Long setup supported by upper-range pressure and vacuum above";
-  } else if (executionQuality === "HIGH" && entryBias === "SHORT") {
-    interpretationLine =
-      "Short setup supported by lower-range pressure and vacuum below";
-  } else if (executionQuality === "MEDIUM" && entryBias === "LONG") {
-    interpretationLine = "Long leaning — structure and pressure mostly aligned";
-  } else if (executionQuality === "MEDIUM" && entryBias === "SHORT") {
-    interpretationLine =
-      "Short leaning — structure and pressure mostly aligned";
+      "Directional alignment is present, but no clean execution setup";
   } else if (rangePosition === "MID") {
     interpretationLine = "Mid-range structure — no clean execution path yet";
   } else {
@@ -571,10 +862,18 @@ export function computeExecutionContext(
     tp2Zone,
     interpretationLine,
     alignmentScore,
-    hasCleanEntry,
+    hasCleanEntry: entryZone !== null,
     structurallyLimited,
     rMultiple,
     executionInvalid,
     invalidReason,
+    directionalState,
+    executionValidityState,
+    isNoChase,
+    isOverheadVacuumShort,
+    idealShortEntryZone,
+    idealLongEntryZone,
+    vacuumInvalidationZone,
+    noAggressionCluster,
   };
 }
