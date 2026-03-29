@@ -256,6 +256,81 @@ import type {
   TrendDirection,
 } from "./types";
 
+function computeATR(klines: Kline[], period = 14): number {
+  const recent = klines.slice(-(period + 1));
+  if (recent.length < 2) return 0;
+  let totalTR = 0;
+  for (let i = 1; i < recent.length; i++) {
+    const hl = recent[i].high - recent[i].low;
+    const hc = Math.abs(recent[i].high - recent[i - 1].close);
+    const lc = Math.abs(recent[i].low - recent[i - 1].close);
+    totalTR += Math.max(hl, hc, lc);
+  }
+  return totalTR / (recent.length - 1);
+}
+
+/**
+ * Validates the computed execution zones for directional and mathematical
+ * consistency. Returns null if valid, or a string reason if invalid.
+ *
+ * LONG rules:
+ *   - SL must be below entry (positive R)
+ *   - TP1 mid must be strictly above entry zone top
+ *   - TP2 mid (if present) must be strictly above TP1 mid
+ *
+ * SHORT rules:
+ *   - SL must be above entry (positive R)
+ *   - TP1 mid must be strictly below entry zone bottom
+ *   - TP2 mid (if present) must be strictly below TP1 mid
+ */
+function validateExecutionZones(
+  bias: EntryBias,
+  entryZone: ExecutionZone,
+  slZone: ExecutionZone,
+  tp1Zone: ExecutionZone,
+  tp2Zone: ExecutionZone | null,
+): string | null {
+  const entryMid = (entryZone.start + entryZone.end) / 2;
+  const slMid = (slZone.start + slZone.end) / 2;
+  const tp1Mid = (tp1Zone.start + tp1Zone.end) / 2;
+
+  if (bias === "LONG") {
+    // SL must be below entry mid — positive R required
+    if (slMid >= entryMid) {
+      return "NO VALID LONG REWARD PATH";
+    }
+    // TP1 must be above the entry zone top (not just entry mid)
+    if (tp1Mid <= entryZone.end) {
+      return "INVALID LONG EXECUTION";
+    }
+    // TP2 (if present) must be above TP1
+    if (tp2Zone !== null) {
+      const tp2Mid = (tp2Zone.start + tp2Zone.end) / 2;
+      if (tp2Mid <= tp1Mid) {
+        return "INVALID LONG EXECUTION";
+      }
+    }
+  } else if (bias === "SHORT") {
+    // SL must be above entry mid — positive R required
+    if (slMid <= entryMid) {
+      return "NO VALID SHORT REWARD PATH";
+    }
+    // TP1 must be below the entry zone bottom (not just entry mid)
+    if (tp1Mid >= entryZone.start) {
+      return "INVALID SHORT EXECUTION";
+    }
+    // TP2 (if present) must be below TP1
+    if (tp2Zone !== null) {
+      const tp2Mid = (tp2Zone.start + tp2Zone.end) / 2;
+      if (tp2Mid >= tp1Mid) {
+        return "INVALID SHORT EXECUTION";
+      }
+    }
+  }
+
+  return null; // valid
+}
+
 export function computeExecutionContext(
   klines: Kline[],
   currentPrice: number,
@@ -311,7 +386,7 @@ export function computeExecutionContext(
   // Base quality from alignment signals
   let executionQuality: ExecutionQuality =
     alignmentScore >= 6 ? "HIGH" : alignmentScore >= 4 ? "MEDIUM" : "LOW";
-  const hasCleanEntry = entryBias !== "NEUTRAL" && executionQuality !== "LOW";
+  const hasCleanEntry = entryBias !== "NEUTRAL";
 
   let entryZone: ExecutionZone | null = null;
   let slZone: ExecutionZone | null = null;
@@ -319,28 +394,36 @@ export function computeExecutionContext(
   let tp2Zone: ExecutionZone | null = null;
   let structurallyLimited = false;
   let rMultiple = 0;
+  let executionInvalid = false;
+  let invalidReason: string | undefined;
 
   if (hasCleanEntry) {
+    const atr = computeATR(klines);
+    const zoneHalfWidth = Math.max(atr * 0.35, currentPrice * 0.0008);
     const recent20 = klines.slice(-20);
+
     if (entryBias === "LONG") {
       entryZone = {
-        start: upperStructure * 0.9995,
-        end: upperStructure * 1.003,
+        start: upperStructure - zoneHalfWidth * 0.4,
+        end: upperStructure + zoneHalfWidth * 1.2,
       };
       const localLow = Math.min(...recent20.map((k) => k.low));
-      slZone = { start: localLow * 0.997, end: localLow * 1.001 };
+      slZone = { start: localLow - atr * 0.25, end: localLow + atr * 0.15 };
       const entryMid = (entryZone.start + entryZone.end) / 2;
       const slMid = (slZone.start + slZone.end) / 2;
       const R = Math.max(entryMid - slMid, entryMid * 0.002);
 
-      // TP1: vacuum midpoint or 1R
-      const tp1Price =
+      // TP1: vacuum midpoint or 1R above entry
+      const rawTp1Price =
         vacuumZone.side === "ABOVE" && vacuumZone.startPrice > 0
           ? (vacuumZone.startPrice + vacuumZone.endPrice) / 2
           : entryMid + R;
-      tp1Zone = { start: tp1Price * 0.9992, end: tp1Price * 1.0008 };
+      // Ensure TP1 is always above entry zone top for a valid LONG
+      const tp1Price = Math.max(rawTp1Price, entryZone.end + atr * 0.3);
+      tp1Zone = { start: tp1Price - atr * 0.2, end: tp1Price + atr * 0.2 };
+      rMultiple = (tp1Price - entryMid) / R;
 
-      // TP2: 1:3 rational model — only target 3R when structure supports it
+      // TP2: 1:3 rational model — null if structure doesn't support it
       const tp2_3R = entryMid + R * 3;
       const vacuumEnd =
         vacuumZone.side === "ABOVE" && vacuumZone.endPrice > 0
@@ -348,44 +431,45 @@ export function computeExecutionContext(
           : 0;
 
       if (vacuumEnd >= entryMid + R * 2.5) {
-        // Vacuum end supports ~3R path
         const tp2Price = Math.min(tp2_3R, vacuumEnd);
-        tp2Zone = { start: tp2Price * 0.999, end: tp2Price * 1.002 };
-        rMultiple = (tp2Price - entryMid) / R;
-      } else if (vacuumEnd >= entryMid + R * 1.5) {
-        // Partial support: use vacuum end, flag as structurally limited
-        tp2Zone = { start: vacuumEnd * 0.999, end: vacuumEnd * 1.002 };
+        // TP2 must be above TP1
+        if (tp2Price > tp1Price) {
+          tp2Zone = { start: tp2Price - atr * 0.2, end: tp2Price + atr * 0.2 };
+          rMultiple = (tp2Price - entryMid) / R;
+        }
+      } else if (vacuumEnd >= entryMid + R * 1.5 && vacuumEnd > tp1Price) {
+        tp2Zone = { start: vacuumEnd - atr * 0.2, end: vacuumEnd + atr * 0.2 };
         rMultiple = (vacuumEnd - entryMid) / R;
         structurallyLimited = true;
         if (executionQuality === "HIGH") executionQuality = "MEDIUM";
       } else {
-        // No clear 3R path — use 2R max, mark limited
-        const tp2Price = entryMid + R * 2;
-        tp2Zone = { start: tp2Price * 0.999, end: tp2Price * 1.002 };
-        rMultiple = 2;
+        tp2Zone = null;
         structurallyLimited = true;
-        executionQuality = "MEDIUM"; // 3R not achievable — cap at MEDIUM
+        if (executionQuality === "HIGH") executionQuality = "MEDIUM";
       }
     } else {
       // SHORT
       entryZone = {
-        start: lowerStructure * 0.997,
-        end: lowerStructure * 1.0005,
+        start: lowerStructure - zoneHalfWidth * 1.2,
+        end: lowerStructure + zoneHalfWidth * 0.4,
       };
       const localHigh = Math.max(...recent20.map((k) => k.high));
-      slZone = { start: localHigh * 0.999, end: localHigh * 1.003 };
+      slZone = { start: localHigh - atr * 0.15, end: localHigh + atr * 0.25 };
       const entryMid = (entryZone.start + entryZone.end) / 2;
       const slMid = (slZone.start + slZone.end) / 2;
       const R = Math.max(slMid - entryMid, entryMid * 0.002);
 
-      // TP1: vacuum midpoint or 1R
-      const tp1Price =
+      // TP1: vacuum midpoint or 1R below entry
+      const rawTp1Price =
         vacuumZone.side === "BELOW" && vacuumZone.startPrice > 0
           ? (vacuumZone.startPrice + vacuumZone.endPrice) / 2
           : entryMid - R;
-      tp1Zone = { start: tp1Price * 0.9992, end: tp1Price * 1.0008 };
+      // Ensure TP1 is always below entry zone bottom for a valid SHORT
+      const tp1Price = Math.min(rawTp1Price, entryZone.start - atr * 0.3);
+      tp1Zone = { start: tp1Price - atr * 0.2, end: tp1Price + atr * 0.2 };
+      rMultiple = (entryMid - tp1Price) / R;
 
-      // TP2: 1:3 rational model
+      // TP2: 1:3 rational model — null if structure doesn't support it
       const tp2_3R = entryMid - R * 3;
       const vacuumEnd =
         vacuumZone.side === "BELOW" && vacuumZone.endPrice > 0
@@ -394,25 +478,64 @@ export function computeExecutionContext(
 
       if (vacuumEnd > 0 && vacuumEnd <= entryMid - R * 2.5) {
         const tp2Price = Math.max(tp2_3R, vacuumEnd);
-        tp2Zone = { start: tp2Price * 0.998, end: tp2Price * 1.001 };
-        rMultiple = (entryMid - tp2Price) / R;
-      } else if (vacuumEnd > 0 && vacuumEnd <= entryMid - R * 1.5) {
-        tp2Zone = { start: vacuumEnd * 0.998, end: vacuumEnd * 1.001 };
+        // TP2 must be below TP1
+        if (tp2Price < tp1Price) {
+          tp2Zone = { start: tp2Price - atr * 0.2, end: tp2Price + atr * 0.2 };
+          rMultiple = (entryMid - tp2Price) / R;
+        }
+      } else if (
+        vacuumEnd > 0 &&
+        vacuumEnd <= entryMid - R * 1.5 &&
+        vacuumEnd < tp1Price
+      ) {
+        tp2Zone = { start: vacuumEnd - atr * 0.2, end: vacuumEnd + atr * 0.2 };
         rMultiple = (entryMid - vacuumEnd) / R;
         structurallyLimited = true;
         if (executionQuality === "HIGH") executionQuality = "MEDIUM";
       } else {
-        const tp2Price = entryMid - R * 2;
-        tp2Zone = { start: tp2Price * 0.998, end: tp2Price * 1.001 };
-        rMultiple = 2;
+        tp2Zone = null;
         structurallyLimited = true;
-        executionQuality = "MEDIUM";
+        if (executionQuality === "HIGH") executionQuality = "MEDIUM";
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // STRICT DIRECTIONAL VALIDATION
+    // After computing all zones, verify they are mathematically consistent.
+    // A setup may be directionally aligned but still invalid for execution.
+    // If invalid: null all zones, mark executionInvalid, downgrade quality.
+    // -----------------------------------------------------------------------
+    if (entryZone && slZone && tp1Zone) {
+      const validationError = validateExecutionZones(
+        entryBias,
+        entryZone,
+        slZone,
+        tp1Zone,
+        tp2Zone,
+      );
+      if (validationError !== null) {
+        executionInvalid = true;
+        invalidReason = validationError;
+        // Do NOT draw contradictory overlay zones on the chart
+        entryZone = null;
+        slZone = null;
+        tp1Zone = null;
+        tp2Zone = null;
+        // Downgrade quality aggressively
+        if (executionQuality === "HIGH" || executionQuality === "MEDIUM") {
+          executionQuality = "LOW";
+        }
+        rMultiple = 0;
+        structurallyLimited = false;
       }
     }
   }
 
+  // Interpretation line — respects invalid state
   let interpretationLine: string;
-  if (structurallyLimited && hasCleanEntry) {
+  if (executionInvalid && invalidReason) {
+    interpretationLine = `${invalidReason} — alignment present but structure fails execution math`;
+  } else if (structurallyLimited && hasCleanEntry) {
     const rmStr = rMultiple.toFixed(1);
     if (entryBias === "LONG") {
       interpretationLine = `Long leaning — structure limits reward path (~${rmStr}R achievable)`;
@@ -451,5 +574,7 @@ export function computeExecutionContext(
     hasCleanEntry,
     structurallyLimited,
     rMultiple,
+    executionInvalid,
+    invalidReason,
   };
 }

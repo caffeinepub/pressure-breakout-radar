@@ -102,17 +102,55 @@ export async function fetchKlinesBatch(
   return results;
 }
 
+export type AggFetchStatus =
+  | "ok"
+  | "empty"
+  | "http_error"
+  | "network_error"
+  | "parse_error";
+
+export interface AggTradeResult {
+  trades: BinanceAggTrade[];
+  status: AggFetchStatus;
+  rawCount: number; // records received before any filtering
+}
+
 export async function fetchAggTrades(
   symbol: string,
   limit = 500,
-): Promise<BinanceAggTrade[] | null> {
+): Promise<AggTradeResult> {
   try {
     const res = await fetch(
-      `${BASE_URL}/fapi/v1/aggTrades?symbol=${symbol}&limit=${limit}`,
+      `${BASE_URL}/fapi/v1/aggTrades?symbol=${encodeURIComponent(symbol)}&limit=${limit}`,
     );
-    if (!res.ok) return null;
-    return await res.json();
+    if (!res.ok) {
+      return { trades: [], status: "http_error", rawCount: 0 };
+    }
+    let data: unknown;
+    try {
+      data = await res.json();
+    } catch {
+      return { trades: [], status: "parse_error", rawCount: 0 };
+    }
+    if (!Array.isArray(data)) {
+      return { trades: [], status: "parse_error", rawCount: 0 };
+    }
+    if (data.length === 0) {
+      return { trades: [], status: "empty", rawCount: 0 };
+    }
+    // Basic field validation — count valid records
+    const valid = (data as BinanceAggTrade[]).filter(
+      (t) =>
+        t &&
+        typeof t.T === "number" &&
+        typeof t.q === "string" &&
+        typeof t.p === "string",
+    );
+    if (valid.length === 0) {
+      return { trades: [], status: "parse_error", rawCount: data.length };
+    }
+    return { trades: valid, status: "ok", rawCount: data.length };
   } catch {
-    return null;
+    return { trades: [], status: "network_error", rawCount: 0 };
   }
 }

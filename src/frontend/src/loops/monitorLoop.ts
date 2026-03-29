@@ -42,9 +42,16 @@ const BUBBLE_TTL_MS = 8000; // 8 seconds
 
 const lastKnownExecutionMap = new Map<
   string,
-  { ctx: ExecutionContext; ts: number }
+  { ctx: ExecutionContext; ts: number; ttl?: number }
 >();
 const EXECUTION_TTL_MS = 15000; // 15s — persists across short interruptions
+
+// Per-symbol+timeframe retry state for agg-trade fetch
+const bubbleRetryState = new Map<
+  string,
+  { count: number; retryAfter: number; cause: string }
+>();
+const RETRY_DELAYS = [1000, 2000, 4000]; // ms: retry 1 after 1s, retry 2 after 2s, retry 3 after 4s
 
 function computeBreakoutContext(
   klines: Kline[],
@@ -241,6 +248,7 @@ export function startMonitorLoop(
   let cancelled = false;
   let intervalId: ReturnType<typeof setInterval> | null = null;
   let inFlight = false;
+  let firstAggFetchDone = false;
   let lastSuccessTime = 0;
   const tensionHistory: number[] = [];
   const pressureHistory: number[] = [];
@@ -321,66 +329,149 @@ export function startMonitorLoop(
 
       const vacuumZone = computeVacuumZone(candles, currentPrice);
 
-      // Optional: aggTrades — failure is safe, last known good is preserved
+      // Optional: aggTrades — failure is safe, uses retry chain + last-known-good
       const bubbleKey = `${symbol}_${timeframe}`;
       let aggressionBubbles: AggressionBubble[] = [];
       let bubbleDebug: BubbleDebugStats | undefined;
+      let bubbleLoopStatus: SelectedMonitorSnapshot["bubbleLoopStatus"] =
+        firstAggFetchDone ? "LIVE" : "BOOTSTRAPPING";
+      let bubbleRetryCount = 0;
+      let bubbleLastFetchCause: string | undefined;
+
       try {
         if (!cancelled) {
-          const aggTrades = await fetchAggTrades(symbol, 1000);
-          if (aggTrades) {
-            const result = buildAggressionBubbles(
-              aggTrades,
-              candles,
-              timeframe,
-            );
-            const clustered = clusterBubbles(result.bubbles, candles);
-            if (clustered.length > 0) {
-              const freshDebug: BubbleDebugStats = {
-                ...result.debug,
-                greenBubbles: clustered.filter((b) => b.side === "BUY").length,
-                redBubbles: clustered.filter((b) => b.side === "SELL").length,
-                avgRadius: Math.round(
-                  clustered.reduce((s, b) => s + b.radius, 0) /
-                    clustered.length,
-                ),
-              };
-              lastKnownBubblesMap.set(bubbleKey, {
-                bubbles: clustered,
-                debug: freshDebug,
-                ts: Date.now(),
-              });
-              aggressionBubbles = clustered;
-              bubbleDebug = freshDebug;
-            } else {
-              // No valid bubbles this tick — try to use last known good
-              const prior = lastKnownBubblesMap.get(bubbleKey);
-              if (prior && Date.now() - prior.ts < BUBBLE_TTL_MS) {
-                aggressionBubbles = prior.bubbles;
-                bubbleDebug = prior.debug;
-              } else {
-                lastKnownBubblesMap.delete(bubbleKey);
-              }
-            }
-          } else {
-            // fetchAggTrades returned null — preserve last known good
+          const retryState = bubbleRetryState.get(bubbleKey);
+
+          if (retryState && Date.now() < retryState.retryAfter) {
+            // Still in retry wait window — preserve last known good, show retry progress
+            bubbleLoopStatus = "RETRYING";
+            bubbleRetryCount = retryState.count;
+            bubbleLastFetchCause = retryState.cause;
             const prior = lastKnownBubblesMap.get(bubbleKey);
             if (prior && Date.now() - prior.ts < BUBBLE_TTL_MS) {
               aggressionBubbles = prior.bubbles;
               bubbleDebug = prior.debug;
+            }
+          } else {
+            // Retry window expired or first attempt — do the fetch
+            bubbleLoopStatus = "FETCHING";
+            const fetchResult = await fetchAggTrades(symbol, 1000);
+            firstAggFetchDone = true;
+
+            if (fetchResult.status === "ok") {
+              // Fetch successful with valid trades — build bubbles
+              bubbleRetryState.delete(bubbleKey); // reset retry chain
+              const result = buildAggressionBubbles(
+                fetchResult.trades,
+                candles,
+                timeframe,
+              );
+              const clustered = clusterBubbles(result.bubbles, candles);
+
+              if (clustered.length > 0) {
+                const freshDebug: BubbleDebugStats = {
+                  ...result.debug,
+                  greenBubbles: clustered.filter((b) => b.side === "BUY")
+                    .length,
+                  redBubbles: clustered.filter((b) => b.side === "SELL").length,
+                  avgRadius: Math.round(
+                    clustered.reduce((s, b) => s + b.radius, 0) /
+                      clustered.length,
+                  ),
+                };
+                lastKnownBubblesMap.set(bubbleKey, {
+                  bubbles: clustered,
+                  debug: freshDebug,
+                  ts: Date.now(),
+                });
+                aggressionBubbles = clustered;
+                bubbleDebug = freshDebug;
+                bubbleLoopStatus = "LIVE";
+                bubbleLastFetchCause = "FETCH_OK";
+              } else {
+                // Fetch OK but no qualifying aggression events above threshold
+                // This is a valid market state — not an error — do NOT retry
+                bubbleLoopStatus = "NO_EVENTS";
+                bubbleLastFetchCause = "FETCH_OK_NO_EVENTS";
+                bubbleDebug = result.debug; // show the 0-count stats for transparency
+                // Preserve last known good bubbles within TTL
+                const prior = lastKnownBubblesMap.get(bubbleKey);
+                if (prior && Date.now() - prior.ts < BUBBLE_TTL_MS) {
+                  aggressionBubbles = prior.bubbles;
+                } else {
+                  lastKnownBubblesMap.delete(bubbleKey);
+                }
+              }
             } else {
-              lastKnownBubblesMap.delete(bubbleKey);
+              // Fetch failed (empty array, HTTP error, network error, parse error)
+              // Engage retry chain before marking STALE
+              const cause =
+                fetchResult.status === "empty"
+                  ? "FETCH_EMPTY"
+                  : fetchResult.status === "parse_error"
+                    ? "PARSE_ERROR"
+                    : fetchResult.status === "http_error"
+                      ? "FETCH_ERROR"
+                      : "FETCH_ERROR";
+
+              const currentRetryCount = retryState?.count ?? 0;
+              const nextCount = currentRetryCount + 1;
+
+              if (nextCount <= 3) {
+                // Schedule next retry with exponential backoff
+                bubbleRetryState.set(bubbleKey, {
+                  count: nextCount,
+                  retryAfter: Date.now() + RETRY_DELAYS[nextCount - 1],
+                  cause,
+                });
+                bubbleLoopStatus = "RETRYING";
+                bubbleRetryCount = nextCount;
+                bubbleLastFetchCause = cause;
+              } else {
+                // All 3 retries exhausted — mark STALE
+                bubbleRetryState.delete(bubbleKey);
+                bubbleLoopStatus = "STALE";
+                bubbleLastFetchCause = "STALE_TTL_EXPIRED";
+              }
+
+              // During retry or after STALE, preserve last known good within TTL
+              const prior = lastKnownBubblesMap.get(bubbleKey);
+              if (prior && Date.now() - prior.ts < BUBBLE_TTL_MS) {
+                aggressionBubbles = prior.bubbles;
+                bubbleDebug = prior.debug;
+              } else if (bubbleLoopStatus === "STALE") {
+                lastKnownBubblesMap.delete(bubbleKey);
+              }
             }
           }
         }
       } catch (aggErr) {
         console.warn(`[monitor aggTrades] ${symbol}:`, aggErr);
-        // On exception — preserve last known good, do not blank the canvas
+        firstAggFetchDone = true; // never block future attempts on exception
+        // Treat exception as FETCH_ERROR, engage retry chain
+        const retryState = bubbleRetryState.get(bubbleKey);
+        const currentRetryCount = retryState?.count ?? 0;
+        const nextCount = currentRetryCount + 1;
+        if (nextCount <= 3) {
+          bubbleRetryState.set(bubbleKey, {
+            count: nextCount,
+            retryAfter: Date.now() + RETRY_DELAYS[nextCount - 1],
+            cause: "FETCH_ERROR",
+          });
+          bubbleLoopStatus = "RETRYING";
+          bubbleRetryCount = nextCount;
+          bubbleLastFetchCause = "FETCH_ERROR";
+        } else {
+          bubbleRetryState.delete(bubbleKey);
+          bubbleLoopStatus = "STALE";
+          bubbleLastFetchCause = "STALE_TTL_EXPIRED";
+        }
+        // Preserve last known good during exception handling
         const prior = lastKnownBubblesMap.get(bubbleKey);
         if (prior && Date.now() - prior.ts < BUBBLE_TTL_MS) {
           aggressionBubbles = prior.bubbles;
           bubbleDebug = prior.debug;
-        } else {
+        } else if (bubbleLoopStatus === "STALE") {
           lastKnownBubblesMap.delete(bubbleKey);
         }
       }
@@ -390,10 +481,7 @@ export function startMonitorLoop(
         return;
       }
 
-      // === EXECUTION CONTEXT (last-known-good protected) ===
-      // Only save to lastKnownExecutionMap when the computed result is truly valid
-      // (hasCleanEntry === true). Weak/no-entry results fall back to the map
-      // so overlays don't vanish on every oscillation of alignmentScore.
+      // === EXECUTION CONTEXT — always store, quality-weighted TTL ===
       const execKey = `${symbol}_${timeframe}`;
       let executionContext: ExecutionContext | undefined;
       if (breakoutContext && candles.length >= 15) {
@@ -406,29 +494,33 @@ export function startMonitorLoop(
           pressureTrend,
           tensionTrend,
         );
+        // Always store — quality determines how long it persists
+        const qualityTtl =
+          computed.executionQuality === "HIGH"
+            ? 20000
+            : computed.executionQuality === "MEDIUM"
+              ? 15000
+              : 8000;
+        lastKnownExecutionMap.set(execKey, {
+          ctx: computed,
+          ts: Date.now(),
+          ttl: qualityTtl,
+        });
         if (computed.hasCleanEntry) {
-          // Valid state — save as last-known-good
-          lastKnownExecutionMap.set(execKey, { ctx: computed, ts: Date.now() });
           setCache(
             `pbr_execution_${symbol}_${timeframe}`,
             computed,
             EXECUTION_TTL_MS,
           );
-          executionContext = computed;
-        } else {
-          // Weak/no-entry — preserve last-known-good if within TTL
-          const priorExec = lastKnownExecutionMap.get(execKey);
-          if (priorExec && Date.now() - priorExec.ts < EXECUTION_TTL_MS) {
-            executionContext = priorExec.ctx;
-          } else {
-            // TTL expired — show the current weak state honestly
-            lastKnownExecutionMap.delete(execKey);
-            executionContext = computed;
-          }
         }
+        executionContext = computed;
       } else {
+        // Not enough data — fall back to last-known-good
         const priorExec = lastKnownExecutionMap.get(execKey);
-        if (priorExec && Date.now() - priorExec.ts < EXECUTION_TTL_MS) {
+        if (
+          priorExec &&
+          Date.now() - priorExec.ts < (priorExec.ttl ?? EXECUTION_TTL_MS)
+        ) {
           executionContext = priorExec.ctx;
         } else {
           lastKnownExecutionMap.delete(execKey);
@@ -453,6 +545,9 @@ export function startMonitorLoop(
         lastSuccessTime,
         aggressionBubbles,
         bubbleDebug,
+        bubbleLoopStatus,
+        bubbleRetryCount,
+        bubbleLastFetchCause,
         timeframe,
         vacuumZone,
         executionContext,

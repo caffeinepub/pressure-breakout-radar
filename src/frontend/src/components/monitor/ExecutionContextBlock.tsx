@@ -15,15 +15,19 @@ function formatZone(z: { start: number; end: number }): string {
 }
 
 export function ExecutionContextBlock({ ctx }: ExecutionContextBlockProps) {
-  const qualityColor =
-    ctx?.executionQuality === "HIGH"
+  const isInvalid = ctx?.executionInvalid === true;
+
+  const qualityColor = isInvalid
+    ? "text-red-400"
+    : ctx?.executionQuality === "HIGH"
       ? "text-radar-green"
       : ctx?.executionQuality === "MEDIUM"
         ? "text-yellow-400"
         : "text-red-400";
 
-  const qualityBg =
-    ctx?.executionQuality === "HIGH"
+  const qualityBg = isInvalid
+    ? "bg-[oklch(0.65_0.20_25/12%)] border-[oklch(0.65_0.20_25/30%)]"
+    : ctx?.executionQuality === "HIGH"
       ? "bg-[oklch(0.72_0.17_145/12%)] border-[oklch(0.72_0.17_145/30%)]"
       : ctx?.executionQuality === "MEDIUM"
         ? "bg-[oklch(0.75_0.15_75/12%)] border-[oklch(0.75_0.15_75/30%)]"
@@ -52,21 +56,25 @@ export function ExecutionContextBlock({ ctx }: ExecutionContextBlockProps) {
         {ctx && (
           <div className="flex items-center gap-1.5">
             <span
-              className={`text-[9px] font-bold font-mono px-2 py-0.5 rounded border ${biasBg}`}
+              className={`text-[9px] font-bold font-mono px-2 py-0.5 rounded border ${
+                isInvalid
+                  ? "bg-[oklch(0.65_0.20_25/12%)] border-[oklch(0.65_0.20_25/30%)] text-red-400"
+                  : biasBg
+              }`}
             >
               {biasIcon} {ctx.entryBias}
             </span>
             <span
               className={`text-[9px] font-bold font-mono px-2 py-0.5 rounded border ${qualityBg} ${qualityColor}`}
             >
-              {ctx.executionQuality}
+              {isInvalid ? "INVALID" : ctx.executionQuality}
             </span>
-            {ctx.rMultiple != null && ctx.rMultiple > 0 && (
+            {!isInvalid && ctx.rMultiple != null && ctx.rMultiple > 0 && (
               <span className="text-[9px] font-mono px-1.5 py-0.5 rounded border border-[oklch(0.78_0.13_195/20%)] text-radar-dim">
                 {ctx.rMultiple.toFixed(1)}R
               </span>
             )}
-            {ctx.structurallyLimited && (
+            {!isInvalid && ctx.structurallyLimited && (
               <span className="text-[8px] font-mono px-1.5 py-0.5 rounded border border-[oklch(0.75_0.15_75/25%)] text-yellow-400/70">
                 LTD
               </span>
@@ -114,7 +122,9 @@ export function ExecutionContextBlock({ ctx }: ExecutionContextBlockProps) {
             </span>
             <span
               className={`text-[11px] font-bold font-mono ${
-                ctx.hasCleanEntry ? "text-radar-cyan" : "text-radar-dim"
+                ctx.hasCleanEntry && !isInvalid
+                  ? "text-radar-cyan"
+                  : "text-radar-dim"
               }`}
             >
               {ctx.hasCleanEntry && ctx.entryBias === "LONG"
@@ -126,7 +136,23 @@ export function ExecutionContextBlock({ ctx }: ExecutionContextBlockProps) {
           </div>
 
           <div className="border-t border-white/5 pt-2 space-y-2">
-            {ctx.hasCleanEntry ? (
+            {/* INVALID execution state — shown instead of zones */}
+            {isInvalid ? (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 py-1 px-2 rounded-lg bg-red-500/8 border border-red-500/20">
+                  <span className="text-red-400 text-[13px] leading-none">
+                    ⚠️
+                  </span>
+                  <span className="text-[11px] font-bold font-mono text-red-400">
+                    {ctx.invalidReason ?? "INVALID EXECUTION"}
+                  </span>
+                </div>
+                <p className="text-[9px] font-mono text-radar-dim/60 italic leading-snug">
+                  Direction is aligned but reward structure is mathematically
+                  inconsistent. No valid entry model can be drawn.
+                </p>
+              </div>
+            ) : ctx.hasCleanEntry ? (
               <>
                 {/* Entry Zone */}
                 {ctx.entryZone && (
@@ -211,11 +237,13 @@ export function ExecutionContextBlock({ ctx }: ExecutionContextBlockProps) {
                   style={{
                     background:
                       i < ctx.alignmentScore
-                        ? ctx.executionQuality === "HIGH"
-                          ? "oklch(0.72 0.17 145)"
-                          : ctx.executionQuality === "MEDIUM"
-                            ? "oklch(0.75 0.15 75)"
-                            : "oklch(0.65 0.20 25)"
+                        ? isInvalid
+                          ? "oklch(0.65 0.20 25 / 60%)"
+                          : ctx.executionQuality === "HIGH"
+                            ? "oklch(0.72 0.17 145)"
+                            : ctx.executionQuality === "MEDIUM"
+                              ? "oklch(0.75 0.15 75)"
+                              : "oklch(0.65 0.20 25)"
                         : "oklch(0.25 0.02 210)",
                   }}
                 />
@@ -225,7 +253,11 @@ export function ExecutionContextBlock({ ctx }: ExecutionContextBlockProps) {
 
           {/* Interpretation line */}
           <div className="pt-1 border-t border-white/5">
-            <p className="text-[10px] font-mono text-radar-dim/80 italic leading-snug">
+            <p
+              className={`text-[10px] font-mono italic leading-snug ${
+                isInvalid ? "text-red-400/70" : "text-radar-dim/80"
+              }`}
+            >
               {ctx.interpretationLine}
             </p>
           </div>

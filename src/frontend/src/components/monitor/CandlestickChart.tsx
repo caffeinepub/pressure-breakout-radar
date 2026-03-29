@@ -379,7 +379,7 @@ export function CandlestickChart({
     }
 
     const ec = stateRef.current.executionContext;
-    if (ec?.hasCleanEntry) {
+    if (ec?.entryBias && ec.entryBias !== "NEUTRAL") {
       const isLong = ec.entryBias === "LONG";
 
       if (ec.slZone) {

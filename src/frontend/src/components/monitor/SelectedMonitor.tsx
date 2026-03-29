@@ -58,7 +58,7 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
     if (cached) {
       setSnapshot({ ...cached, status: "REFRESHING" });
       // Restore stable overlays from cache if available
-      if (cached.executionContext?.hasCleanEntry) {
+      if (cached.executionContext) {
         setStableExecCtx(cached.executionContext);
         setExecOverlayTs(cached.lastSuccessTime ?? 0);
       }
@@ -82,8 +82,8 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
         } else {
           patchSnapshot(update);
         }
-        // Update stable execution overlay only when we have a valid hasCleanEntry result
-        if (update.executionContext?.hasCleanEntry) {
+        // Update stable execution overlay for any computed execution context
+        if (update.executionContext) {
           setStableExecCtx(update.executionContext);
           setExecOverlayTs(Date.now());
         }
@@ -241,7 +241,15 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
                 AGG BUBBLES
                 {dbg
                   ? ` ▼ EV:${dbg.eventsDetected} G:${dbg.greenBubbles} R:${dbg.redBubbles}`
-                  : " ▼ —"}
+                  : snapshot?.bubbleLoopStatus === "RETRYING"
+                    ? ` ▼ RETRY ${snapshot.bubbleRetryCount ?? "?"}/3`
+                    : snapshot?.bubbleLoopStatus === "NO_EVENTS"
+                      ? " ▼ NO EVENTS"
+                      : snapshot?.bubbleLoopStatus === "STALE"
+                        ? " ▼ STALE"
+                        : snapshot?.bubbleLoopStatus === "FETCHING"
+                          ? " ▼ FETCHING"
+                          : " ▼ BOOTSTRAPPING"}
               </span>
               <span className="ml-auto opacity-50">
                 {debugOpen ? "▲" : "▼"}
@@ -294,9 +302,58 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
                     )}
                   </>
                 ) : (
-                  <span className="text-radar-dim">
-                    Waiting for first agg-trade fetch…
-                  </span>
+                  <div className="space-y-0.5">
+                    <span
+                      className="font-bold"
+                      style={{
+                        color:
+                          snapshot?.bubbleLoopStatus === "STALE"
+                            ? "oklch(0.65 0.20 25)"
+                            : snapshot?.bubbleLoopStatus === "RETRYING"
+                              ? "oklch(0.75 0.18 55)"
+                              : snapshot?.bubbleLoopStatus === "NO_EVENTS"
+                                ? "oklch(0.65 0.10 195)"
+                                : "oklch(0.55 0.05 200)",
+                      }}
+                    >
+                      {snapshot?.bubbleLoopStatus === "BOOTSTRAPPING"
+                        ? "BOOTSTRAPPING"
+                        : snapshot?.bubbleLoopStatus === "FETCHING"
+                          ? "FETCHING AGG-TRADES"
+                          : snapshot?.bubbleLoopStatus === "RETRYING"
+                            ? `RETRY ${snapshot.bubbleRetryCount ?? "?"}/3`
+                            : snapshot?.bubbleLoopStatus === "NO_EVENTS"
+                              ? "FETCH OK / NO EVENTS"
+                              : snapshot?.bubbleLoopStatus === "STALE"
+                                ? "STALE TTL EXPIRED"
+                                : "WAITING"}
+                    </span>
+                    {snapshot?.bubbleLastFetchCause && (
+                      <div className="text-radar-dim/70">
+                        cause:{" "}
+                        <span className="text-radar-dim">
+                          {snapshot.bubbleLastFetchCause}
+                        </span>
+                      </div>
+                    )}
+                    {snapshot?.bubbleLoopStatus === "NO_EVENTS" && (
+                      <div className="text-radar-dim/60 text-[8px] mt-1">
+                        Fetch succeeded — no bucket exceeded aggression
+                        threshold this window
+                      </div>
+                    )}
+                    {snapshot?.bubbleLoopStatus === "RETRYING" && (
+                      <div className="text-radar-dim/60 text-[8px] mt-1">
+                        Last known good bubbles preserved — retrying before
+                        STALE
+                      </div>
+                    )}
+                    {snapshot?.bubbleLoopStatus === "STALE" && (
+                      <div className="text-radar-dim/60 text-[8px] mt-1">
+                        3 retries exhausted — TTL expired with no valid data
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
             )}

@@ -100,6 +100,9 @@ export interface ExecutionContext {
   hasCleanEntry: boolean;
   structurallyLimited?: boolean;
   rMultiple?: number;
+  // Execution validity — set when directional math is inconsistent
+  executionInvalid?: boolean;
+  invalidReason?: string;
 }
 
 export interface SelectedMonitorSnapshot {
@@ -117,6 +120,15 @@ export interface SelectedMonitorSnapshot {
   lastSuccessTime: number;
   aggressionBubbles?: AggressionBubble[];
   bubbleDebug?: BubbleDebugStats;
+  bubbleLoopStatus?:
+    | "BOOTSTRAPPING"
+    | "FETCHING"
+    | "LIVE"
+    | "NO_EVENTS"
+    | "RETRYING"
+    | "STALE";
+  bubbleRetryCount?: number;
+  bubbleLastFetchCause?: string;
   timeframe?: "1m" | "5m" | "15m";
   vacuumZone?: VacuumZone;
   executionContext?: ExecutionContext;
