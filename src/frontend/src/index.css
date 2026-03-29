@@ -1,0 +1,264 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@font-face {
+  font-family: "Satoshi";
+  src: url("/assets/fonts/Satoshi.woff2") format("woff2");
+  font-weight: 300 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "GeistMono";
+  src: url("/assets/fonts/GeistMono.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@layer base {
+  :root {
+    --radius: 0.875rem;
+
+    /* === Pressure Breakout Radar — Dark-first palette === */
+    /* Background: deep blue-black #07171C */
+    --background: 0.1 0.025 200;
+    /* Card: dark teal-gray #0D2428 */
+    --card: 0.16 0.032 198;
+    --card-foreground: 0.95 0.01 200;
+    --card-glow: 0.82 0.12 190;
+    /* Foreground: near-white #EAF2F4 */
+    --foreground: 0.95 0.01 200;
+    /* Popover */
+    --popover: 0.18 0.035 196;
+    --popover-foreground: 0.95 0.01 200;
+    /* Primary: cyan #27D3DF */
+    --primary: 0.78 0.13 195;
+    --primary-foreground: 0.1 0.025 200;
+    /* Secondary: darker card */
+    --secondary: 0.2 0.03 197;
+    --secondary-foreground: 0.72 0.02 200;
+    /* Muted */
+    --muted: 0.18 0.025 198;
+    --muted-foreground: 0.72 0.02 200;
+    /* Accent: cyan */
+    --accent: 0.78 0.13 195;
+    --accent-foreground: 0.1 0.025 200;
+    /* Destructive: red */
+    --destructive: 0.63 0.21 25;
+    --destructive-foreground: 0.95 0.01 200;
+    /* Border: subtle cyan */
+    --border: 0.78 0.13 195 / 18%;
+    --input: 0.78 0.13 195 / 15%;
+    --ring: 0.78 0.13 195;
+    /* Chart tokens */
+    --chart-1: 0.78 0.13 195;
+    --chart-2: 0.7 0.17 145;
+    --chart-3: 0.73 0.18 68;
+    --chart-4: 0.63 0.21 25;
+    --chart-5: 0.72 0.02 200;
+    /* Sidebar (unused but required) */
+    --sidebar: 0.16 0.032 198;
+    --sidebar-foreground: 0.95 0.01 200;
+    --sidebar-primary: 0.78 0.13 195;
+    --sidebar-primary-foreground: 0.1 0.025 200;
+    --sidebar-accent: 0.2 0.03 197;
+    --sidebar-accent-foreground: 0.72 0.02 200;
+    --sidebar-border: 0.78 0.13 195 / 18%;
+    --sidebar-ring: 0.78 0.13 195;
+    /* Radar-specific custom tokens */
+    --radar-cyan: 0.78 0.13 195;
+    --radar-green: 0.7 0.17 145;
+    --radar-orange: 0.73 0.18 68;
+    --radar-orange-bg: 0.42 0.13 58;
+    --radar-dim: 0.72 0.02 200;
+    --radar-track: 0.23 0.03 198;
+    --radar-teal-fill: 0.78 0.11 185;
+    --radar-orange-fill: 0.73 0.18 52;
+    --radar-card-border: 0.78 0.12 190 / 25%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    background: linear-gradient(
+      160deg,
+      oklch(0.11 0.025 200) 0%,
+      oklch(0.08 0.02 210) 100%
+    );
+    min-height: 100vh;
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-transparent text-foreground;
+    font-family: "Satoshi", system-ui, sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  #root {
+    min-height: 100vh;
+    position: relative;
+  }
+}
+
+/* === Technical grid overlay === */
+.radar-grid::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background-image: linear-gradient(
+      rgba(50, 120, 130, 0.08) 1px,
+      transparent 1px
+    ), linear-gradient(90deg, rgba(50, 120, 130, 0.08) 1px, transparent 1px);
+  background-size: 40px 40px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* === Live pulse dot === */
+@keyframes radar-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.7);
+  }
+}
+
+.live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: oklch(var(--radar-green));
+  animation: radar-pulse 1.6s ease-in-out infinite;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.live-dot-cyan {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: oklch(var(--radar-cyan));
+  animation: radar-pulse 2s ease-in-out infinite;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+/* === Scanning blink === */
+@keyframes scan-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.scan-blink {
+  animation: scan-blink 1.2s ease-in-out infinite;
+}
+
+/* === Card glow === */
+.card-glow {
+  border: 1px solid oklch(var(--radar-card-border));
+  box-shadow: 0 0 0 1px oklch(var(--radar-card-border)), inset 0 1px 0
+    oklch(0.78 0.12 190 / 8%), 0 4px 24px oklch(0.06 0.02 200 / 80%);
+}
+
+.card-glow-active {
+  border: 1px solid oklch(0.78 0.13 195 / 40%);
+  box-shadow: 0 0 0 1px oklch(0.78 0.13 195 / 20%), inset 0 1px 0
+    oklch(0.78 0.12 190 / 12%), 0 4px 32px oklch(0.06 0.02 200 / 90%);
+}
+
+/* === Scrollbar === */
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: oklch(0.3 0.03 198);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.4 0.06 195);
+}
+
+/* === Rank badge ring === */
+.rank-ring {
+  border: 2px solid oklch(var(--radar-orange));
+  box-shadow: 0 0 8px oklch(var(--radar-orange) / 30%);
+}
+
+/* === Phase badge colors (class-driven) === */
+.phase-preburst {
+  background: oklch(0.42 0.13 58 / 80%);
+  color: oklch(0.88 0.16 68);
+  border: 1px solid oklch(0.73 0.18 68 / 40%);
+}
+
+.phase-building {
+  background: oklch(0.2 0.06 190 / 80%);
+  color: oklch(0.78 0.11 185);
+  border: 1px solid oklch(0.78 0.11 185 / 40%);
+}
+
+.phase-active {
+  background: oklch(0.18 0.08 195 / 80%);
+  color: oklch(0.78 0.13 195);
+  border: 1px solid oklch(0.78 0.13 195 / 40%);
+}
+
+.phase-breakout {
+  background: oklch(0.2 0.08 230 / 80%);
+  color: oklch(0.75 0.12 230);
+  border: 1px solid oklch(0.75 0.12 230 / 40%);
+}
+
+.phase-flat {
+  background: oklch(0.22 0.015 200 / 80%);
+  color: oklch(0.55 0.015 200);
+  border: 1px solid oklch(0.4 0.015 200 / 40%);
+}
+
+/* === Progress bars === */
+.score-track {
+  background: oklch(var(--radar-track));
+  border-radius: 999px;
+  overflow: hidden;
+  height: 4px;
+}
+
+.score-fill-orange {
+  background: linear-gradient(90deg, oklch(0.65 0.16 52), oklch(0.73 0.18 52));
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.6s ease;
+}
+
+.score-fill-cyan {
+  background: linear-gradient(90deg, oklch(0.68 0.12 185), oklch(0.78 0.11 185));
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.6s ease;
+}
+
+.score-fill-green {
+  background: linear-gradient(90deg, oklch(0.62 0.15 145), oklch(0.7 0.17 145));
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.6s ease;
+}
