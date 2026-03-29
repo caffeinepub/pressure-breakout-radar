@@ -348,6 +348,113 @@ function validateExecutionZones(
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// RECLAIM SETUP DETECTOR
+// Detects failed-aggression reclaim setups as a second execution model.
+// LONG reclaim: bearish cluster that price has moved above (failed sellers)
+// SHORT reclaim: bullish cluster that price has moved below (failed buyers)
+// ---------------------------------------------------------------------------
+interface ReclaimSetup {
+  type: "LONG_RECLAIM" | "SHORT_RECLAIM";
+  entryZone: ExecutionZone;
+  slZone: ExecutionZone;
+  isExtended: boolean; // price too far from reclaim zone — wait for retest
+  quality: ExecutionQuality;
+}
+
+function computeReclaimSetup(
+  bubbles: AggressionBubble[],
+  currentPrice: number,
+  atr: number,
+  upperStructure: number,
+  lowerStructure: number,
+  existingBias: EntryBias,
+  pressure: PressureResult,
+  pressureTrend: TrendDirection,
+  rangePosition: RangePosition,
+): ReclaimSetup | null {
+  const rangeSize = Math.max(upperStructure - lowerStructure, atr * 3);
+
+  // --- LONG RECLAIM: bearish cluster that price has reclaimed above ---
+  // Only if existing bias is not strongly SHORT
+  if (existingBias !== "SHORT") {
+    const bearishCluster = findAggressionCluster(bubbles, "SELL", atr);
+    if (bearishCluster && bearishCluster.strength >= 6) {
+      const reclaimBuffer = atr * 0.15;
+      if (currentPrice > bearishCluster.highPrice + reclaimBuffer) {
+        // Price reclaimed above the bearish cluster — potential LONG reclaim
+        const entryZone: ExecutionZone = {
+          start: bearishCluster.centerPrice - atr * 0.2,
+          end: bearishCluster.highPrice + atr * 0.2,
+        };
+        const slZone: ExecutionZone = {
+          start: bearishCluster.lowPrice - atr * 0.5,
+          end: bearishCluster.lowPrice - atr * 0.05,
+        };
+        // No-chase: price too far above the reclaim zone (wait for retest back to zone)
+        const isExtended = currentPrice > entryZone.end + atr * 1.5;
+
+        // Quality: based on confirmation signals
+        const confirmations = [
+          pressure.side !== "DOWN",
+          pressureTrend === "RISING",
+          rangePosition !== "LOWER",
+        ].filter(Boolean).length;
+        const quality: ExecutionQuality =
+          confirmations >= 3 ? "HIGH" : confirmations >= 2 ? "MEDIUM" : "LOW";
+
+        return { type: "LONG_RECLAIM", entryZone, slZone, isExtended, quality };
+      }
+    }
+  }
+
+  // --- SHORT RECLAIM: bullish cluster that price has broken below ---
+  // Only if existing bias is not strongly LONG
+  if (existingBias !== "LONG") {
+    const bullishCluster = findAggressionCluster(bubbles, "BUY", atr);
+    if (bullishCluster && bullishCluster.strength >= 6) {
+      const reclaimBuffer = atr * 0.15;
+      if (currentPrice < bullishCluster.lowPrice - reclaimBuffer) {
+        // Price broke below the bullish cluster — potential SHORT reclaim
+        const entryZone: ExecutionZone = {
+          start: bullishCluster.lowPrice - atr * 0.2,
+          end: bullishCluster.centerPrice + atr * 0.2,
+        };
+        const slZone: ExecutionZone = {
+          start: bullishCluster.highPrice + atr * 0.05,
+          end: bullishCluster.highPrice + atr * 0.5,
+        };
+        // No-chase: price too far below the reclaim zone
+        const isExtended = currentPrice < entryZone.start - atr * 1.5;
+
+        const confirmations = [
+          pressure.side !== "UP",
+          pressureTrend === "RISING",
+          rangePosition !== "UPPER",
+        ].filter(Boolean).length;
+        const quality: ExecutionQuality =
+          confirmations >= 3 ? "HIGH" : confirmations >= 2 ? "MEDIUM" : "LOW";
+
+        return {
+          type: "SHORT_RECLAIM",
+          entryZone,
+          slZone,
+          isExtended,
+          quality,
+        };
+      }
+    }
+  }
+
+  // Also check VOID (no existing bias) — check both directions, pick stronger cluster
+  if (existingBias === "NEUTRAL") {
+    // Already covered above since NEUTRAL is not SHORT and not LONG
+  }
+
+  void rangeSize; // suppress unused warning
+  return null;
+}
+
 export function computeExecutionContext(
   klines: Kline[],
   currentPrice: number,
@@ -437,10 +544,12 @@ export function computeExecutionContext(
   let vacuumInvalidationZone: ExecutionZone | null = null;
   // Whether there was no meaningful aggression cluster
   let noAggressionCluster = false;
+  let isReclaimEntry = false;
+  let reclaimType: "LONG_RECLAIM" | "SHORT_RECLAIM" | null = null;
+
+  const atr = computeATR(klines);
 
   if (hasCleanEntry) {
-    const atr = computeATR(klines);
-
     if (entryBias === "LONG") {
       // =======================================================================
       // LONG EXECUTION — entry anchored to bullish aggression cluster
@@ -765,11 +874,164 @@ export function computeExecutionContext(
   }
 
   // ---------------------------------------------------------------------------
+  // RECLAIM DETECTION — second execution model
+  // Runs after continuation logic. Activates only when no valid continuation
+  // entry zone was produced.
+  // ---------------------------------------------------------------------------
+  if (!entryZone && !isNoChase && aggressionBubbles.length > 0) {
+    const reclaimSetup = computeReclaimSetup(
+      aggressionBubbles,
+      currentPrice,
+      atr,
+      upperStructure,
+      lowerStructure,
+      entryBias,
+      pressure,
+      pressureTrend,
+      rangePosition,
+    );
+
+    if (reclaimSetup) {
+      isReclaimEntry = true;
+      reclaimType = reclaimSetup.type;
+
+      if (reclaimSetup.isExtended) {
+        // Price too far from reclaim zone — store ideal zone for reference only
+        if (reclaimSetup.type === "LONG_RECLAIM") {
+          idealLongEntryZone = reclaimSetup.entryZone;
+          vacuumInvalidationZone = reclaimSetup.slZone;
+        } else {
+          idealShortEntryZone = reclaimSetup.entryZone;
+          vacuumInvalidationZone = reclaimSetup.slZone;
+        }
+      } else {
+        // Valid reclaim entry — compute TP from range/structure
+        const reclaimEntry = reclaimSetup.entryZone;
+        const reclaimSl = reclaimSetup.slZone;
+        const entryMidR = (reclaimEntry.start + reclaimEntry.end) / 2;
+        const slMidR = (reclaimSl.start + reclaimSl.end) / 2;
+
+        const isLongReclaim = reclaimSetup.type === "LONG_RECLAIM";
+        const R = isLongReclaim
+          ? Math.max(entryMidR - slMidR, entryMidR * 0.002)
+          : Math.max(slMidR - entryMidR, entryMidR * 0.002);
+
+        // TP logic: range-based — use structure boundaries, not vacuum
+        const isOutsideRangeLong =
+          isLongReclaim && currentPrice > upperStructure;
+        const isOutsideRangeShort =
+          !isLongReclaim && currentPrice < lowerStructure;
+        const rangeSize = Math.max(upperStructure - lowerStructure, atr * 3);
+
+        let reclaimTp1: ExecutionZone | null = null;
+        let reclaimTp2: ExecutionZone | null = null;
+        let reclaimR = 0;
+
+        if (isLongReclaim) {
+          const tp1Raw = isOutsideRangeLong
+            ? upperStructure + rangeSize * 0.3
+            : upperStructure;
+          const tp1Price = Math.max(tp1Raw, reclaimEntry.end + atr * 0.3);
+          reclaimTp1 = {
+            start: tp1Price - atr * 0.2,
+            end: tp1Price + atr * 0.2,
+          };
+          reclaimR = (tp1Price - entryMidR) / R;
+
+          const tp2Raw = isOutsideRangeLong
+            ? upperStructure + rangeSize * 0.618
+            : upperStructure + rangeSize * 0.25;
+          if (tp2Raw > tp1Price + atr * 0.3) {
+            reclaimTp2 = { start: tp2Raw - atr * 0.2, end: tp2Raw + atr * 0.2 };
+            reclaimR = (tp2Raw - entryMidR) / R;
+          }
+        } else {
+          const tp1Raw = isOutsideRangeShort
+            ? lowerStructure - rangeSize * 0.3
+            : lowerStructure;
+          const tp1Price = Math.min(tp1Raw, reclaimEntry.start - atr * 0.3);
+          reclaimTp1 = {
+            start: tp1Price - atr * 0.2,
+            end: tp1Price + atr * 0.2,
+          };
+          reclaimR = (entryMidR - tp1Price) / R;
+
+          const tp2Raw = isOutsideRangeShort
+            ? lowerStructure - rangeSize * 0.618
+            : lowerStructure - rangeSize * 0.25;
+          if (tp2Raw < tp1Price - atr * 0.3) {
+            reclaimTp2 = { start: tp2Raw - atr * 0.2, end: tp2Raw + atr * 0.2 };
+            reclaimR = (entryMidR - tp2Raw) / R;
+          }
+        }
+
+        // Validate before accepting
+        const reclaimBias: EntryBias = isLongReclaim ? "LONG" : "SHORT";
+        const reclaimValidErr = reclaimTp1
+          ? validateExecutionZones(
+              reclaimBias,
+              reclaimEntry,
+              reclaimSl,
+              reclaimTp1,
+              reclaimTp2,
+            )
+          : "No TP zone";
+
+        // Also check 1R minimum
+        const tp1MidR = reclaimTp1
+          ? (reclaimTp1.start + reclaimTp1.end) / 2
+          : 0;
+        const tp1RValue = reclaimTp1
+          ? isLongReclaim
+            ? (tp1MidR - entryMidR) / R
+            : (entryMidR - tp1MidR) / R
+          : 0;
+
+        if (reclaimValidErr === null && tp1RValue >= 1.0 && reclaimTp1) {
+          entryZone = reclaimEntry;
+          slZone = reclaimSl;
+          tp1Zone = reclaimTp1;
+          tp2Zone = reclaimTp2;
+          rMultiple = reclaimR;
+          executionQuality = reclaimSetup.quality;
+          entryBias = reclaimBias;
+        } else {
+          // Reclaim exists but zones didn't pass validation — mark extended/wait
+          isReclaimEntry = true;
+          if (reclaimSetup.type === "LONG_RECLAIM") {
+            idealLongEntryZone = reclaimSetup.entryZone;
+          } else {
+            idealShortEntryZone = reclaimSetup.entryZone;
+          }
+          // Clear the failed zone attempt
+          entryZone = null;
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // EXECUTION VALIDITY STATE RESOLUTION
-  // Priority: no-chase > no-cluster > invalid > valid > neutral
+  // Priority: reclaim-wait > no-chase > no-cluster > invalid > reclaim-valid > valid > neutral
   // ---------------------------------------------------------------------------
   let executionValidityState: string;
-  if (noAggressionCluster && entryBias === "LONG") {
+  if (isReclaimEntry && reclaimType === "LONG_RECLAIM" && !entryZone) {
+    executionValidityState = "RECLAIM_LONG_WAIT_RETEST";
+  } else if (isReclaimEntry && reclaimType === "SHORT_RECLAIM" && !entryZone) {
+    executionValidityState = "RECLAIM_SHORT_WAIT_RETEST";
+  } else if (
+    isReclaimEntry &&
+    reclaimType === "LONG_RECLAIM" &&
+    entryZone !== null
+  ) {
+    executionValidityState = "RECLAIM_LONG";
+  } else if (
+    isReclaimEntry &&
+    reclaimType === "SHORT_RECLAIM" &&
+    entryZone !== null
+  ) {
+    executionValidityState = "RECLAIM_SHORT";
+  } else if (noAggressionCluster && entryBias === "LONG") {
     executionValidityState = "LONG_NO_AGGRESSION_CLUSTER";
   } else if (noAggressionCluster && entryBias === "SHORT") {
     executionValidityState = "SHORT_NO_AGGRESSION_CLUSTER";
@@ -793,7 +1055,29 @@ export function computeExecutionContext(
   // INTERPRETATION LINE — aggression-anchored language
   // ---------------------------------------------------------------------------
   let interpretationLine: string;
-  if (
+  if (executionValidityState === "RECLAIM_LONG") {
+    if (executionQuality === "HIGH") {
+      interpretationLine =
+        "Failed seller aggression reclaimed — long setup active, invalidation below failed zone";
+    } else {
+      interpretationLine =
+        "Reclaim confirmed above failed bearish aggression — long entry near reclaimed zone";
+    }
+  } else if (executionValidityState === "RECLAIM_SHORT") {
+    if (executionQuality === "HIGH") {
+      interpretationLine =
+        "Failed buyer aggression lost — short setup active, invalidation above failed zone";
+    } else {
+      interpretationLine =
+        "Reclaim confirmed below failed bullish aggression — short entry near reclaimed zone";
+    }
+  } else if (executionValidityState === "RECLAIM_LONG_WAIT_RETEST") {
+    interpretationLine =
+      "Price extended beyond reclaim zone — wait for retest to failed aggression zone";
+  } else if (executionValidityState === "RECLAIM_SHORT_WAIT_RETEST") {
+    interpretationLine =
+      "Price extended below failed aggression zone — wait for retest back to reclaim level";
+  } else if (
     executionValidityState === "LONG_NO_AGGRESSION_CLUSTER" ||
     executionValidityState === "SHORT_NO_AGGRESSION_CLUSTER"
   ) {
@@ -875,5 +1159,7 @@ export function computeExecutionContext(
     idealLongEntryZone,
     vacuumInvalidationZone,
     noAggressionCluster,
+    isReclaimEntry,
+    reclaimType,
   };
 }

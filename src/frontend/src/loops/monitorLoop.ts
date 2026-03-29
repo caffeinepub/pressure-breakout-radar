@@ -480,7 +480,13 @@ export function startMonitorLoop(
           aggressionBubbles,
         );
 
-        if (computed.hasCleanEntry) {
+        const isReclaimActive =
+          computed.executionValidityState === "RECLAIM_LONG" ||
+          computed.executionValidityState === "RECLAIM_SHORT" ||
+          computed.executionValidityState === "RECLAIM_LONG_WAIT_RETEST" ||
+          computed.executionValidityState === "RECLAIM_SHORT_WAIT_RETEST";
+
+        if (computed.hasCleanEntry || isReclaimActive) {
           // Fresh valid execution with clean entry — update last-known-good map
           const qualityTtl = computed.executionInvalid
             ? 5_000

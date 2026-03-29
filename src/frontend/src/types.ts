@@ -139,6 +139,8 @@ export interface ExecutionContext {
   // "LONG_BIAS_NO_CLEAN_ENTRY" | "SHORT_BIAS_NO_CLEAN_ENTRY" — price too far from aggression cluster
   // "LONG_NO_AGGRESSION_CLUSTER" | "SHORT_NO_AGGRESSION_CLUSTER" — no cluster found
   // "NEUTRAL_LOW"
+  // "RECLAIM_LONG" | "RECLAIM_SHORT" — valid reclaim entry from failed aggression
+  // "RECLAIM_LONG_WAIT_RETEST" | "RECLAIM_SHORT_WAIT_RETEST" — price extended, wait for retest
   executionValidityState: string;
   // No-chase: price too far from the aggression cluster
   isNoChase?: boolean;
@@ -146,6 +148,10 @@ export interface ExecutionContext {
   isOverheadVacuumShort?: boolean;
   // Whether no meaningful aggression cluster was found
   noAggressionCluster?: boolean;
+  // Whether this is a reclaim entry (failed aggression model)
+  isReclaimEntry?: boolean;
+  // Which type of reclaim: LONG (reclaimed above failed red) or SHORT (broke below failed green)
+  reclaimType?: "LONG_RECLAIM" | "SHORT_RECLAIM" | null;
   // Ideal short entry zone for faint chart reference in no-chase state
   idealShortEntryZone?: ExecutionZone | null;
   // Ideal long entry zone for faint chart reference in no-chase state

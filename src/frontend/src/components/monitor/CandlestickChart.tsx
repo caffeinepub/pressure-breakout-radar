@@ -383,7 +383,9 @@ export function CandlestickChart({
       ec?.entryBias &&
       ec.entryBias !== "NEUTRAL" &&
       (ec.executionValidityState === "VALID_LONG" ||
-        ec.executionValidityState === "VALID_SHORT")
+        ec.executionValidityState === "VALID_SHORT" ||
+        ec.executionValidityState === "RECLAIM_LONG" ||
+        ec.executionValidityState === "RECLAIM_SHORT")
     ) {
       const isLong = ec.entryBias === "LONG";
 

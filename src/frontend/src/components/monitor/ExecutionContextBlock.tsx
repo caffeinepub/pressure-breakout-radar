@@ -101,6 +101,22 @@ function ValidityBadge({
       label: "NO AGG CLUSTER",
       cls: "text-radar-dim bg-[oklch(0.25_0.02_210/40%)] border-[oklch(0.35_0.02_210/30%)]",
     },
+    RECLAIM_LONG: {
+      label: "RECLAIM LONG",
+      cls: "text-[oklch(0.78_0.18_150)] bg-[oklch(0.72_0.17_145/12%)] border-[oklch(0.72_0.17_145/35%)]",
+    },
+    RECLAIM_SHORT: {
+      label: "RECLAIM SHORT",
+      cls: "text-[oklch(0.72_0.20_30)] bg-[oklch(0.65_0.20_25/12%)] border-[oklch(0.65_0.20_25/35%)]",
+    },
+    RECLAIM_LONG_WAIT_RETEST: {
+      label: "RECLAIM / WAIT RETEST",
+      cls: "text-amber-400 bg-[oklch(0.72_0.15_60/10%)] border-[oklch(0.72_0.15_60/30%)]",
+    },
+    RECLAIM_SHORT_WAIT_RETEST: {
+      label: "RECLAIM / WAIT RETEST",
+      cls: "text-amber-400 bg-[oklch(0.72_0.15_60/10%)] border-[oklch(0.72_0.15_60/30%)]",
+    },
     NEUTRAL_LOW: {
       label: "NEUTRAL / LOW",
       cls: "text-radar-dim bg-[oklch(0.25_0.02_210/40%)] border-[oklch(0.35_0.02_210/30%)]",
@@ -132,11 +148,19 @@ export function ExecutionContextBlock({ ctx }: ExecutionContextBlockProps) {
     execValidity === "SHORT_NO_AGGRESSION_CLUSTER";
   const isValidExec =
     execValidity === "VALID_LONG" || execValidity === "VALID_SHORT";
+  const isReclaimValid =
+    execValidity === "RECLAIM_LONG" || execValidity === "RECLAIM_SHORT";
+  const isReclaimWait =
+    execValidity === "RECLAIM_LONG_WAIT_RETEST" ||
+    execValidity === "RECLAIM_SHORT_WAIT_RETEST";
 
-  const alignmentBarColor =
-    isInvalid && !isBiasNoExec && !isNoCleanEntry
+  const alignmentBarColor = isReclaimValid
+    ? execValidity === "RECLAIM_LONG"
+      ? "oklch(0.72 0.17 145 / 80%)"
+      : "oklch(0.65 0.20 25 / 80%)"
+    : isInvalid && !isBiasNoExec && !isNoCleanEntry
       ? "oklch(0.65 0.20 25 / 60%)"
-      : isBiasNoExec || isNoCleanEntry
+      : isBiasNoExec || isNoCleanEntry || isReclaimWait
         ? "oklch(0.72 0.15 60 / 70%)"
         : ctx?.executionQuality === "HIGH"
           ? "oklch(0.72 0.17 145)"
@@ -218,13 +242,18 @@ export function ExecutionContextBlock({ ctx }: ExecutionContextBlockProps) {
                     : "text-radar-dim"
               }`}
             >
-              {isOverheadVacuumShort
-                ? "OVERHEAD (RESISTANCE)"
-                : ctx.entryBias === "LONG"
-                  ? "ABOVE"
-                  : ctx.entryBias === "SHORT"
-                    ? "BELOW"
-                    : "CHECK CHART"}
+              {isReclaimValid || isReclaimWait
+                ? execValidity === "RECLAIM_LONG" ||
+                  execValidity === "RECLAIM_LONG_WAIT_RETEST"
+                  ? "FAILED SELLER ZONE"
+                  : "FAILED BUYER ZONE"
+                : isOverheadVacuumShort
+                  ? "OVERHEAD (RESISTANCE)"
+                  : ctx.entryBias === "LONG"
+                    ? "ABOVE"
+                    : ctx.entryBias === "SHORT"
+                      ? "BELOW"
+                      : "CHECK CHART"}
             </span>
           </div>
 
@@ -244,6 +273,157 @@ export function ExecutionContextBlock({ ctx }: ExecutionContextBlockProps) {
                   </div>
                 </div>
               </div>
+            )}
+
+            {/* RECLAIM WAIT FOR RETEST */}
+            {isReclaimWait && (
+              <div className="space-y-2.5">
+                <div className="flex items-center gap-2 py-1.5 px-2 rounded-lg bg-amber-500/8 border border-amber-500/20">
+                  <span className="text-amber-400 text-[14px] leading-none">
+                    ⏳
+                  </span>
+                  <div className="space-y-0.5">
+                    <div className="text-[10px] font-bold font-mono text-amber-400">
+                      {execValidity === "RECLAIM_LONG_WAIT_RETEST"
+                        ? "RECLAIM LONG / WAIT FOR RETEST"
+                        : "RECLAIM SHORT / WAIT FOR RETEST"}
+                    </div>
+                    <div className="text-[8px] font-mono text-amber-400/60">
+                      PRICE EXTENDED — WAIT FOR RETEST TO FAILED AGGRESSION ZONE
+                    </div>
+                  </div>
+                </div>
+                {/* Ideal reclaim zone reference (faint) */}
+                {execValidity === "RECLAIM_LONG_WAIT_RETEST" &&
+                  ctx.idealLongEntryZone && (
+                    <div className="flex items-start justify-between gap-2 opacity-60">
+                      <div className="shrink-0 space-y-0.5">
+                        <div className="text-[9px] font-mono text-radar-green/70 uppercase tracking-wider">
+                          RECLAIM ZONE
+                        </div>
+                        <div className="text-[8px] font-mono text-radar-dim/50">
+                          FAILED SELLER AGGRESSION
+                        </div>
+                      </div>
+                      <span className="text-[10px] font-mono text-radar-green/70 text-right">
+                        {formatZone(ctx.idealLongEntryZone)}
+                      </span>
+                    </div>
+                  )}
+                {execValidity === "RECLAIM_SHORT_WAIT_RETEST" &&
+                  ctx.idealShortEntryZone && (
+                    <div className="flex items-start justify-between gap-2 opacity-60">
+                      <div className="shrink-0 space-y-0.5">
+                        <div className="text-[9px] font-mono text-red-400/70 uppercase tracking-wider">
+                          RECLAIM ZONE
+                        </div>
+                        <div className="text-[8px] font-mono text-radar-dim/50">
+                          FAILED BUYER AGGRESSION
+                        </div>
+                      </div>
+                      <span className="text-[10px] font-mono text-red-400/70 text-right">
+                        {formatZone(ctx.idealShortEntryZone)}
+                      </span>
+                    </div>
+                  )}
+                {ctx.vacuumInvalidationZone && (
+                  <div className="flex items-start justify-between gap-2 opacity-60">
+                    <div className="shrink-0 space-y-0.5">
+                      <div className="text-[9px] font-mono text-radar-dim/70 uppercase tracking-wider">
+                        INVALIDATION
+                      </div>
+                      <div className="text-[8px] font-mono text-red-400/50">
+                        {execValidity === "RECLAIM_LONG_WAIT_RETEST"
+                          ? "BELOW FAILED AGGRESSION ZONE"
+                          : "ABOVE FAILED AGGRESSION ZONE"}
+                      </div>
+                    </div>
+                    <span className="text-[10px] font-mono text-red-400/60 text-right">
+                      {formatZone(ctx.vacuumInvalidationZone)}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* VALID RECLAIM ENTRY */}
+            {isReclaimValid && ctx.entryZone && (
+              <>
+                {/* Reclaim header badge */}
+                <div className="flex items-center gap-2 py-1 px-2 rounded-lg bg-[oklch(0.72_0.15_60/8%)] border border-[oklch(0.72_0.15_60/20%)]">
+                  <span className="text-[13px] leading-none">
+                    {execValidity === "RECLAIM_LONG" ? "↑" : "↓"}
+                  </span>
+                  <div className="space-y-0.5">
+                    <div
+                      className={`text-[10px] font-bold font-mono ${execValidity === "RECLAIM_LONG" ? "text-radar-green" : "text-red-400"}`}
+                    >
+                      {execValidity === "RECLAIM_LONG"
+                        ? "FAILED SELLER AGGRESSION RECLAIMED"
+                        : "FAILED BUYER AGGRESSION LOST"}
+                    </div>
+                    <div className="text-[8px] font-mono text-radar-dim/50">
+                      {execValidity === "RECLAIM_LONG"
+                        ? "RECLAIM CONFIRMED — INVALIDATION BELOW FAILED ZONE"
+                        : "RECLAIM CONFIRMED — INVALIDATION ABOVE FAILED ZONE"}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="shrink-0 space-y-0.5">
+                    <div className="text-[9px] font-mono text-radar-dim uppercase tracking-wider">
+                      ENTRY ZONE
+                    </div>
+                    <div className="text-[8px] font-mono text-radar-dim/50">
+                      {execValidity === "RECLAIM_LONG"
+                        ? "FAILED BEARISH AGGRESSION ZONE"
+                        : "FAILED BULLISH AGGRESSION ZONE"}
+                    </div>
+                  </div>
+                  <span
+                    className={`text-[10px] font-mono text-right ${execValidity === "RECLAIM_LONG" ? "text-radar-green" : "text-red-400"}`}
+                  >
+                    {formatZone(ctx.entryZone)}
+                  </span>
+                </div>
+                {ctx.slZone && (
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="shrink-0 space-y-0.5">
+                      <div className="text-[9px] font-mono text-radar-dim uppercase tracking-wider">
+                        SL ZONE
+                      </div>
+                      <div className="text-[8px] font-mono text-red-400/60">
+                        {execValidity === "RECLAIM_LONG"
+                          ? "BELOW FAILED AGGRESSION ZONE"
+                          : "ABOVE FAILED AGGRESSION ZONE"}
+                      </div>
+                    </div>
+                    <span className="text-[10px] font-mono text-red-400 text-right">
+                      {formatZone(ctx.slZone)}
+                    </span>
+                  </div>
+                )}
+                {ctx.tp1Zone && (
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="text-[9px] font-mono text-radar-dim uppercase tracking-wider shrink-0">
+                      TP1 ZONE
+                    </span>
+                    <span className="text-[10px] font-mono text-radar-cyan text-right">
+                      {formatZone(ctx.tp1Zone)}
+                    </span>
+                  </div>
+                )}
+                {ctx.tp2Zone && (
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="text-[9px] font-mono text-radar-dim uppercase tracking-wider shrink-0">
+                      TP2 ZONE
+                    </span>
+                    <span className="text-[10px] font-mono text-radar-cyan/70 text-right">
+                      {formatZone(ctx.tp2Zone)}
+                    </span>
+                  </div>
+                )}
+              </>
             )}
 
             {/* NO CLEAN ENTRY — price too far from aggression cluster */}
@@ -435,7 +615,9 @@ export function ExecutionContextBlock({ ctx }: ExecutionContextBlockProps) {
               !isBiasNoExec &&
               !isValidExec &&
               !isNoCleanEntry &&
-              !isNoAggrCluster && (
+              !isNoAggrCluster &&
+              !isReclaimValid &&
+              !isReclaimWait && (
                 <div className="flex items-center gap-2 py-0.5">
                   <span className="text-[10px] font-mono text-radar-dim opacity-60">
                     NO CLEAN ENTRY ZONE
@@ -469,13 +651,17 @@ export function ExecutionContextBlock({ ctx }: ExecutionContextBlockProps) {
           <div className="pt-1 border-t border-white/5">
             <p
               className={`text-[10px] font-mono italic leading-snug ${
-                isNoCleanEntry
-                  ? "text-amber-400/70"
-                  : isBiasNoExec
+                isReclaimValid
+                  ? execValidity === "RECLAIM_LONG"
+                    ? "text-radar-green/70"
+                    : "text-red-400/70"
+                  : isReclaimWait || isNoCleanEntry
                     ? "text-amber-400/70"
-                    : isInvalid
-                      ? "text-red-400/70"
-                      : "text-radar-dim/80"
+                    : isBiasNoExec
+                      ? "text-amber-400/70"
+                      : isInvalid
+                        ? "text-red-400/70"
+                        : "text-radar-dim/80"
               }`}
             >
               {ctx.interpretationLine}
