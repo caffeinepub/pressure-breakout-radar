@@ -9,6 +9,7 @@ import {
 import { fetchAllTickers, fetchKlines, parseKlines } from "../binanceApi";
 import type { BinanceAggTrade } from "../binanceApi";
 import { getCache, setCache } from "../cache";
+import { setRuntimeMode } from "../runtimeCore";
 import {
   assignPhase,
   computeBreakoutScore,
@@ -31,11 +32,11 @@ import type {
   TrendDirection,
 } from "../types";
 
-// ─── VERIFICATION THRESHOLDS (tuned for visibility phase) ─────────────────
+// ─── VERIFICATION THRESHOLDS ─────────────────────────────────────────────────────
 const BUBBLE_DIR_THRESHOLD = 0.52;
 const BUBBLE_VOL_FLOOR = 0.05;
 
-// ─── BUBBLE PERSISTENCE ────────────────────────────────────────────────────
+// ─── BUBBLE PERSISTENCE ──────────────────────────────────────────────────────────
 const BUBBLE_TTL_MS = 30_000;
 
 const lastKnownBubblesMap = new Map<
@@ -55,8 +56,16 @@ const lastKnownExecutionMap = new Map<
 >();
 const EXECUTION_TTL_MS = 15_000;
 
-// ─── HELPERS ───────────────────────────────────────────────────────────────
+// ─── DUPLICATE-LOOP GUARD ────────────────────────────────────────────────────────
+// Ensures at most one active loop per symbol+timeframe combination.
+// Calling startMonitorLoop for an already-running key cancels the prior one.
+const activeLoops = new Map<string, () => void>();
 
+// ─── CATCH-UP GUARD ─────────────────────────────────────────────────────────────
+// Only one catch-up run at a time per symbol+timeframe.
+const catchUpInProgress = new Set<string>();
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────────
 function computeBreakoutContext(
   klines: Kline[],
   currentPrice: number,
@@ -240,14 +249,136 @@ function clusterBubbles(
   return kept;
 }
 
-// ─── MAIN LOOP ─────────────────────────────────────────────────────────────
+// ─── CATCH-UP FETCH ────────────────────────────────────────────────────────────────
+//
+// When returning from background with a gap > CATCH_UP_THRESHOLD_MS,
+// fetch a wider candle window to fill the gap, then switch to LIVE.
 
+/**
+ * Perform a one-shot catch-up: fetch an extended candle window to bridge
+ * the time gap since lastSuccessTime.  Fires setRuntimeMode transitions.
+ * Safe to call only once per resume (catchUpInProgress guards duplicates).
+ */
+export async function performCatchUp(
+  symbol: string,
+  timeframe: "1m" | "5m" | "15m",
+  lastSuccessTime: number,
+  onUpdate: (snapshot: Partial<SelectedMonitorSnapshot>) => void,
+  onStatus: (status: MonitorStatus) => void,
+): Promise<void> {
+  const key = `${symbol}_${timeframe}`;
+  if (catchUpInProgress.has(key)) return;
+  catchUpInProgress.add(key);
+
+  const gapMs = Date.now() - lastSuccessTime;
+
+  // Determine how many extra candles we need to cover the gap
+  const intervalMs =
+    timeframe === "15m" ? 900_000 : timeframe === "5m" ? 300_000 : 60_000;
+  const extraCandles = Math.min(
+    200,
+    Math.ceil(gapMs / intervalMs) + 20, // +20 buffer
+  );
+  const fetchLimit = Math.max(100, extraCandles);
+
+  try {
+    const [tickers, rawKlines] = await Promise.all([
+      fetchAllTickers(),
+      fetchKlines(symbol, timeframe, fetchLimit),
+    ]);
+
+    if (!tickers || !rawKlines) {
+      // Catch-up fetch failed — keep frozen snapshot, mark STALE
+      onStatus("STALE");
+      setRuntimeMode("STALE");
+      return;
+    }
+
+    const ticker = tickers.find((t) => t.symbol === symbol);
+    if (!ticker) {
+      onStatus("STALE");
+      setRuntimeMode("STALE");
+      return;
+    }
+
+    const candles = parseKlines(rawKlines);
+    const currentPrice = Number.parseFloat(ticker.lastPrice);
+    const priceChangePct = Number.parseFloat(ticker.priceChangePercent);
+
+    const tension = computeTension(candles);
+    const pressure = computePressure(priceChangePct);
+    const breakoutScore = computeBreakoutScore(tension, pressure, candles);
+    const phase = assignPhase(tension, pressure, breakoutScore, candles);
+    const breakoutContext =
+      candles.length >= 10
+        ? computeBreakoutContext(candles, currentPrice)
+        : null;
+    const vacuumZone = computeVacuumZone(candles, currentPrice);
+
+    // Patch in the refreshed data — bubbles/execution come from normal loop
+    onUpdate({
+      symbol,
+      price: currentPrice,
+      phase,
+      tension,
+      pressure,
+      breakoutScore,
+      breakoutContext,
+      candles,
+      vacuumZone,
+      lastSuccessTime: Date.now(),
+      status: "LIVE",
+      timeframe,
+    });
+    onStatus("LIVE");
+    setRuntimeMode("LIVE");
+
+    setCache(
+      `monitor_${symbol}_${timeframe}`,
+      {
+        symbol,
+        price: currentPrice,
+        phase,
+        tension,
+        pressure,
+        breakoutScore,
+        breakoutContext,
+        candles,
+        vacuumZone,
+        lastSuccessTime: Date.now(),
+        status: "LIVE",
+        timeframe,
+        tensionTrend: "FLAT",
+        pressureTrend: "FLAT",
+      },
+      8000,
+    );
+  } catch (err) {
+    console.warn(`[catchUp] ${symbol}:`, err);
+    // Don't blank UI on catch-up failure — frozen snapshot remains visible
+    onStatus("STALE");
+    setRuntimeMode("STALE");
+  } finally {
+    catchUpInProgress.delete(key);
+  }
+}
+
+// ─── MAIN LOOP ───────────────────────────────────────────────────────────────────────
 export function startMonitorLoop(
   symbol: string,
   timeframe: "1m" | "5m" | "15m",
   onUpdate: (snapshot: Partial<SelectedMonitorSnapshot>) => void,
   onStatus: (status: MonitorStatus) => void,
 ): () => void {
+  const loopKey = `${symbol}_${timeframe}`;
+
+  // ── Cancel any existing loop for this key (duplicate-loop guard) ─────────
+  const existingCancel = activeLoops.get(loopKey);
+  if (existingCancel) {
+    existingCancel();
+    activeLoops.delete(loopKey);
+  }
+
   let cancelled = false;
   let intervalId: ReturnType<typeof setInterval> | null = null;
   let inFlight = false;
@@ -257,20 +388,21 @@ export function startMonitorLoop(
   const pressureHistory: number[] = [];
   const bubbleKey = `${symbol}_${timeframe}`;
 
-  // ── Load from cache immediately ────────────────────────────────────────
+  // ── Load from cache immediately ─────────────────────────────────────────────
   const cached = getCache<SelectedMonitorSnapshot>(
     `monitor_${symbol}_${timeframe}`,
   );
   if (cached) {
     onUpdate({ ...cached, status: "REFRESHING" });
     onStatus("REFRESHING");
+    // Seed lastSuccessTime so first tick gap-check is accurate
+    lastSuccessTime = cached.lastSuccessTime ?? 0;
   }
 
-  // ── Subscribe to WebSocket aggTrade stream ─────────────────────────────
-  // The WS runs independently; the tick loop just reads from its buffer.
+  // ── Subscribe to WebSocket aggTrade stream ───────────────────────────────
   const unsubWs = subscribeAggTradeStream(symbol);
 
-  // ── One-shot REST bootstrap (runs in background, non-blocking) ─────────
+  // ── One-shot REST bootstrap ─────────────────────────────────────────────────
   async function doBootstrap() {
     if (bootstrapDone || isAggRestBanned()) return;
     await bootstrapRestAggTrades(symbol, 1000);
@@ -278,7 +410,7 @@ export function startMonitorLoop(
   }
   doBootstrap();
 
-  // ── Build bubble layer from WS buffer ─────────────────────────────────
+  // ── Build bubble layer from WS buffer ──────────────────────────────────────
   function buildBubblesFromBuffer(candles: Kline[]): {
     aggressionBubbles: AggressionBubble[];
     bubbleDebug: BubbleDebugStats | undefined;
@@ -296,7 +428,6 @@ export function startMonitorLoop(
       lastSuccessBubbleCount: priorEntry?.bubbleCount ?? 0,
     };
 
-    // Map WS connection state to a loop status label
     let bubbleLoopStatus: SelectedMonitorSnapshot["bubbleLoopStatus"];
     if (wsStatus === "LIVE") {
       bubbleLoopStatus = "WS_LIVE";
@@ -310,7 +441,6 @@ export function startMonitorLoop(
 
     const buffer = getAggTradeBuffer(symbol);
 
-    // If buffer has data, compute bubbles regardless of WS connection state
     if (buffer.length > 0) {
       const result = buildAggressionBubbles(buffer, candles, timeframe);
       const clustered = clusterBubbles(result.bubbles, candles);
@@ -347,11 +477,10 @@ export function startMonitorLoop(
           },
         };
       }
-      // Buffer had trades but no qualifying bucket — valid market state
       if (wsStatus === "LIVE") bubbleLoopStatus = "NO_EVENTS";
     }
 
-    // No qualifying bubbles from buffer — try to serve last-known-good
+    // No qualifying bubbles — serve last-known-good
     const prior = lastKnownBubblesMap.get(bubbleKey);
     if (prior && Date.now() - prior.ts < BUBBLE_TTL_MS) {
       return {
@@ -364,7 +493,6 @@ export function startMonitorLoop(
       };
     }
 
-    // REST ban info in diagnostics
     const banMs = restBanRemainingMs();
     const diagWithBan: BubbleFetchDiagnostics = {
       ...diagBase,
@@ -451,7 +579,6 @@ export function startMonitorLoop(
 
       const vacuumZone = computeVacuumZone(candles, currentPrice);
 
-      // ── AGGRESSION BUBBLES (WS-primary, no REST polling) ────────────────
       const {
         aggressionBubbles,
         bubbleDebug,
@@ -465,7 +592,7 @@ export function startMonitorLoop(
         return;
       }
 
-      // ── EXECUTION CONTEXT ───────────────────────────────────────────────
+      // ── EXECUTION CONTEXT ──────────────────────────────────────────────────
       const execKey = `${symbol}_${timeframe}`;
       let executionContext: ExecutionContext | undefined;
       if (breakoutContext && candles.length >= 15) {
@@ -487,7 +614,6 @@ export function startMonitorLoop(
           computed.executionValidityState === "RECLAIM_SHORT_WAIT_RETEST";
 
         if (computed.hasCleanEntry || isReclaimActive) {
-          // Fresh valid execution with clean entry — update last-known-good map
           const qualityTtl = computed.executionInvalid
             ? 5_000
             : computed.executionQuality === "HIGH"
@@ -507,8 +633,6 @@ export function startMonitorLoop(
           );
           executionContext = computed;
         } else {
-          // No clean entry (no aggression cluster, no-chase, or invalid) —
-          // serve last-known-good execution context while it is still fresh.
           const priorExecFresh = lastKnownExecutionMap.get(execKey);
           if (
             priorExecFresh &&
@@ -517,7 +641,6 @@ export function startMonitorLoop(
           ) {
             executionContext = priorExecFresh.ctx;
           } else {
-            // Prior expired — show current state (directional context but no entry zones)
             lastKnownExecutionMap.delete(execKey);
             executionContext = computed;
           }
@@ -564,6 +687,9 @@ export function startMonitorLoop(
       setCache(`monitor_${symbol}_${timeframe}`, snapshot, 8000);
       onUpdate(snapshot);
       onStatus("LIVE");
+
+      // Switch runtime mode to LIVE once the first successful tick completes
+      setRuntimeMode("LIVE");
     } catch (err) {
       console.warn(`[monitor tick] ${symbol}:`, err);
       useHealthStore.getState().incrementFailedRequests();
@@ -592,9 +718,13 @@ export function startMonitorLoop(
   tick();
   intervalId = setInterval(tick, 1000);
 
-  return () => {
+  const cancel = () => {
     cancelled = true;
     if (intervalId !== null) clearInterval(intervalId);
     unsubWs();
+    activeLoops.delete(loopKey);
   };
+
+  activeLoops.set(loopKey, cancel);
+  return cancel;
 }

@@ -3,6 +3,7 @@ import { getCache } from "./cache";
 import { AppHeader } from "./components/AppHeader";
 import { Top10List } from "./components/Top10List";
 import { SelectedMonitor } from "./components/monitor/SelectedMonitor";
+import { initRuntimeCore } from "./runtimeCore";
 import { useTop10LiveStore } from "./stores/top10LiveStore";
 import { useTop10SelectionStore } from "./stores/top10SelectionStore";
 import { useUIStore } from "./stores/uiStore";
@@ -18,8 +19,11 @@ export default function App() {
   const hasData = useTop10SelectionStore((s) => s.isInitialized);
   const selectedSymbol = useUIStore((s) => s.selectedSymbol);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional one-shot setup
+  // biome-ignore lint/correctness/useExhaustiveDependencies: one-shot setup
   useEffect(() => {
+    // Initialise the background freeze/resume core — idempotent, safe to call once
+    initRuntimeCore();
+
     const cached = getCache<Candidate[]>("top10Snapshot");
     if (cached && cached.length > 0) {
       setCandidates(cached);
@@ -65,7 +69,7 @@ export default function App() {
 
         <footer className="px-4 py-4 border-t border-[oklch(0.78_0.13_195/8%)]">
           <p className="text-center text-[10px] text-radar-dim">
-            © {new Date().getFullYear()} Built with love using{" "}
+            &copy; {new Date().getFullYear()} Built with love using{" "}
             <a
               href={`https://caffeine.ai?utm_source=caffeine-footer&utm_medium=referral&utm_content=${encodeURIComponent(typeof window !== "undefined" ? window.location.hostname : "")}`}
               target="_blank"

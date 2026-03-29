@@ -1,7 +1,18 @@
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { getCache } from "../../cache";
-import { startMonitorLoop } from "../../loops/monitorLoop";
+import { performCatchUp, startMonitorLoop } from "../../loops/monitorLoop";
+import {
+  type RuntimeMode,
+  clearActiveMonitor,
+  getRuntimeMode,
+  loadFrozenChartState,
+  loadFrozenSnapshot,
+  setRuntimeMode,
+  subscribeResume,
+  subscribeRuntimeMode,
+  updateActiveMonitor,
+} from "../../runtimeCore";
 import { useSelectedMonitorStore } from "../../stores/selectedMonitorStore";
 import { useUIStore } from "../../stores/uiStore";
 import type {
@@ -45,38 +56,135 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
   const [debugOpen, setDebugOpen] = useState(false);
   const loopCleanupRef = useRef<(() => void) | null>(null);
 
-  // ── STABLE OVERLAY STATE ────────────────────────────────────────────────
-  // Only update when truly valid data arrives.
-  // A bad tick / empty array NEVER overwrites these.
+  // ── RUNTIME MODE STATE ───────────────────────────────────────────────────
+  const [runtimeMode, setLocalRuntimeMode] = useState<RuntimeMode>(() =>
+    getRuntimeMode(),
+  );
+
+  // ── STABLE OVERLAY STATE ─────────────────────────────────────────────────
   const [stableExecCtx, setStableExecCtx] = useState<ExecutionContext | null>(
     null,
   );
   const [stableBubbles, setStableBubbles] = useState<AggressionBubble[]>([]);
   const [execOverlayTs, setExecOverlayTs] = useState<number>(0);
-  // ───────────────────────────────────────────────────────────────────
+
+  // ── Sync runtime mode from core ────────────────────────────────────────────
+  useEffect(() => {
+    const unsub = subscribeRuntimeMode((mode) => {
+      setLocalRuntimeMode(mode);
+    });
+    return unsub;
+  }, []);
+
+  // ── Subscribe to resume events from runtimeCore ───────────────────────────
+  useEffect(() => {
+    const unsub = subscribeResume((frozenSnapshot, frozenChartState) => {
+      // 1. Restore snapshot immediately — no blank screen
+      if (frozenSnapshot) {
+        setSnapshot({ ...frozenSnapshot, status: "REFRESHING" });
+        // Restore stable overlays from snapshot
+        if (frozenSnapshot.executionContext) {
+          setStableExecCtx(frozenSnapshot.executionContext);
+          setExecOverlayTs(frozenSnapshot.lastSuccessTime ?? 0);
+        }
+        if (
+          frozenSnapshot.aggressionBubbles &&
+          frozenSnapshot.aggressionBubbles.length > 0
+        ) {
+          setStableBubbles(frozenSnapshot.aggressionBubbles);
+        }
+      }
+
+      // 2. Restore chart view state if available
+      if (frozenChartState) {
+        if (frozenChartState.paddingMode) {
+          setPaddingMode(frozenChartState.paddingMode as PaddingMode);
+        }
+        // Timeframe is already correct (symbol+timeframe are preserved)
+      }
+
+      // 3. Trigger catch-up using the last known success timestamp
+      const lastTs = frozenSnapshot?.lastSuccessTime ?? 0;
+      const gapMs = Date.now() - lastTs;
+      const CATCH_UP_THRESHOLD_MS = 30_000;
+
+      if (lastTs > 0 && gapMs > CATCH_UP_THRESHOLD_MS) {
+        // Perform catch-up fetch to fill the gap
+        performCatchUp(
+          symbol,
+          timeframe,
+          lastTs,
+          (update) => {
+            const isFullSnapshot =
+              "candles" in update &&
+              "symbol" in update &&
+              "lastSuccessTime" in update;
+            if (isFullSnapshot) {
+              setSnapshot(update as SelectedMonitorSnapshot);
+            } else {
+              patchSnapshot(update);
+            }
+          },
+          (status) => {
+            patchSnapshot({ status });
+          },
+        );
+      } else {
+        // Gap is small — normal loop will catch up on next tick
+        setRuntimeMode("LIVE");
+      }
+    });
+    return unsub;
+  }, [symbol, timeframe, setSnapshot, patchSnapshot]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: stable zustand actions, symbol/timeframe-keyed setup
   useEffect(() => {
-    // Reset on symbol/timeframe change — enforces strict isolation
+    // Reset on symbol/timeframe change — strict isolation
     setStableExecCtx(null);
     setStableBubbles([]);
     setExecOverlayTs(0);
 
+    // Try frozen localStorage snapshot first (covers page reload after background)
+    const frozen = loadFrozenSnapshot(symbol, timeframe);
+    const frozenChart = loadFrozenChartState(symbol, timeframe);
+
     const cached = getCache<SelectedMonitorSnapshot>(
       `monitor_${symbol}_${timeframe}`,
     );
-    if (cached) {
-      setSnapshot({ ...cached, status: "REFRESHING" });
-      if (cached.executionContext) {
-        setStableExecCtx(cached.executionContext);
-        setExecOverlayTs(cached.lastSuccessTime ?? 0);
+
+    // Use whichever snapshot is fresher
+    const restoreFrom =
+      frozen &&
+      (!cached || frozen.lastSuccessTime > (cached.lastSuccessTime ?? 0))
+        ? frozen
+        : cached;
+
+    if (restoreFrom) {
+      setSnapshot({ ...restoreFrom, status: "REFRESHING" });
+      if (restoreFrom.executionContext) {
+        setStableExecCtx(restoreFrom.executionContext);
+        setExecOverlayTs(restoreFrom.lastSuccessTime ?? 0);
       }
-      if (cached.aggressionBubbles && cached.aggressionBubbles.length > 0) {
-        setStableBubbles(cached.aggressionBubbles);
+      if (
+        restoreFrom.aggressionBubbles &&
+        restoreFrom.aggressionBubbles.length > 0
+      ) {
+        setStableBubbles(restoreFrom.aggressionBubbles);
       }
     } else {
       clearSnapshot();
     }
+
+    // Restore chart view from frozen state
+    if (frozenChart?.paddingMode) {
+      setPaddingMode(frozenChart.paddingMode as PaddingMode);
+    }
+
+    // Register this monitor as active in runtimeCore
+    updateActiveMonitor(symbol, timeframe, {
+      paddingMode,
+      timeframe,
+    });
 
     const cleanup = startMonitorLoop(
       symbol,
@@ -91,15 +199,10 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
         } else {
           patchSnapshot(update);
         }
-        // Stable exec context: only replace when we have a computed value
         if (update.executionContext) {
           setStableExecCtx(update.executionContext);
           setExecOverlayTs(Date.now());
         }
-        // Stable bubbles: only replace when the incoming set is non-empty.
-        // During RETRY, the loop already passes last-known-good bubbles in
-        // aggressionBubbles. If that set is non-empty we update; if it's
-        // empty (TTL truly expired) we keep the previous stableBubbles value.
         if (update.aggressionBubbles && update.aggressionBubbles.length > 0) {
           setStableBubbles(update.aggressionBubbles);
         }
@@ -113,15 +216,20 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
 
     return () => {
       loopCleanupRef.current?.();
+      clearActiveMonitor();
     };
   }, [symbol, timeframe]);
+
+  // ── Keep runtimeCore in sync with current chart view state ────────────────
+  useEffect(() => {
+    updateActiveMonitor(symbol, timeframe, { paddingMode, timeframe });
+  }, [symbol, timeframe, paddingMode]);
 
   const handleClose = () => setSelectedSymbol(null);
   const dbg = snapshot?.bubbleDebug;
   const diag = snapshot?.bubbleFetchDiagnostics;
   const loopStatus = snapshot?.bubbleLoopStatus;
 
-  // "Visible bubbles on chart" — directly reflects what is drawn
   const visibleOnChart = stableBubbles.length;
   const visibleGreenOnChart = stableBubbles.filter(
     (b) => b.side === "BUY",
@@ -130,7 +238,24 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
     (b) => b.side === "SELL",
   ).length;
 
-  // Pill header summary
+  // Runtime mode badge
+  const showModeBadge =
+    runtimeMode === "CATCH_UP" ||
+    runtimeMode === "FROZEN" ||
+    runtimeMode === "STALE";
+  const modeBadgeLabel =
+    runtimeMode === "CATCH_UP"
+      ? "CATCHING UP"
+      : runtimeMode === "FROZEN"
+        ? "FROZEN"
+        : "STALE";
+  const modeBadgeColor =
+    runtimeMode === "CATCH_UP"
+      ? "oklch(0.75 0.18 55)"
+      : runtimeMode === "STALE"
+        ? "oklch(0.65 0.20 25)"
+        : "oklch(0.55 0.05 200)";
+
   const pillSummary = (() => {
     if (loopStatus === "RETRYING")
       return ` ▼ RETRY ${snapshot?.bubbleRetryCount ?? "?"}/${RETRY_DELAYS_COUNT} | CHART:${visibleOnChart}`;
@@ -146,12 +271,11 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
 
   const dotColor =
     visibleOnChart > 0
-      ? "oklch(0.72 0.17 145)" // green — bubbles are drawn
+      ? "oklch(0.72 0.17 145)"
       : loopStatus === "STALE"
-        ? "oklch(0.65 0.20 25)" // red — stale
-        : "oklch(0.45 0.05 200)"; // dim — no bubbles yet
+        ? "oklch(0.65 0.20 25)"
+        : "oklch(0.45 0.05 200)";
 
-  // Failure type display
   const failureTypeColor = (ft: string | undefined): string => {
     if (!ft) return "oklch(0.55 0.05 200)";
     if (ft === "ABORT_ERROR") return "oklch(0.75 0.18 55)";
@@ -216,6 +340,29 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
             )}
           </div>
 
+          {/* Runtime mode badge — CATCH_UP / FROZEN / STALE */}
+          {showModeBadge && (
+            <div className="px-4 pb-1">
+              <div
+                className="flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[9px] font-mono tracking-wider w-fit"
+                style={{
+                  color: modeBadgeColor,
+                  border: `1px solid ${modeBadgeColor}40`,
+                  background: `${modeBadgeColor}15`,
+                }}
+              >
+                <span
+                  className="inline-block w-1.5 h-1.5 rounded-full"
+                  style={{ background: modeBadgeColor }}
+                />
+                {modeBadgeLabel}
+                {runtimeMode === "CATCH_UP" && (
+                  <span className="opacity-60 ml-1">filling gap…</span>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="border-t border-[oklch(0.78_0.13_195/8%)]" />
 
           {/* Alignment Status Strip */}
@@ -275,7 +422,7 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
             <ExecutionContextBlock ctx={stableExecCtx} />
           </div>
 
-          {/* ── BUBBLE DEBUG PILL (collapsible, outside chart canvas) ── */}
+          {/* ── BUBBLE DEBUG PILL (collapsible) ── */}
           <div className="px-4 mt-1.5">
             <button
               type="button"
@@ -294,7 +441,7 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
 
             {debugOpen && (
               <div className="mt-1 px-3 py-2.5 rounded-xl border border-[oklch(0.78_0.13_195/15%)] bg-[oklch(0.08_0.02_210/90%)] font-mono text-[9px] leading-relaxed space-y-2">
-                {/* ── VISIBLE BUBBLES ON CHART ── */}
+                {/* Chart Draw Layer */}
                 <div>
                   <div className="text-[8px] text-radar-dim/50 uppercase tracking-wider mb-1">
                     Chart Draw Layer
@@ -318,7 +465,7 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
                   </div>
                 </div>
 
-                {/* ── CURRENT LOOP STATE ── */}
+                {/* Loop State */}
                 <div>
                   <div className="text-[8px] text-radar-dim/50 uppercase tracking-wider mb-1">
                     Loop State
@@ -352,10 +499,20 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
                     <span className="text-foreground">
                       {snapshot?.bubbleLastFetchCause ?? "—"}
                     </span>
+
+                    <span className="text-radar-dim">Runtime mode</span>
+                    <span
+                      style={{
+                        color: modeBadgeColor,
+                        fontWeight: runtimeMode !== "LIVE" ? 700 : undefined,
+                      }}
+                    >
+                      {runtimeMode}
+                    </span>
                   </div>
                 </div>
 
-                {/* ── LAST SUCCESSFUL FETCH ── */}
+                {/* Last Successful Fetch */}
                 <div>
                   <div className="text-[8px] text-radar-dim/50 uppercase tracking-wider mb-1">
                     Last Successful Fetch
@@ -373,7 +530,7 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
                   </div>
                 </div>
 
-                {/* ── DETECTION STATS (when available) ── */}
+                {/* Detection Stats */}
                 {dbg && (
                   <div>
                     <div className="text-[8px] text-radar-dim/50 uppercase tracking-wider mb-1">
@@ -414,7 +571,7 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
                   </div>
                 )}
 
-                {/* ── FETCH DIAGNOSTICS (on failure) ── */}
+                {/* Fetch Diagnostics */}
                 {diag?.failureType && (
                   <div>
                     <div className="text-[8px] text-radar-dim/50 uppercase tracking-wider mb-1">
@@ -489,7 +646,6 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
                   </div>
                 )}
 
-                {/* Contextual guidance */}
                 {loopStatus === "RETRYING" && (
                   <div className="text-[8px] text-radar-dim/60 pt-0.5 border-t border-[oklch(0.78_0.13_195/10%)]">
                     Last-known-good bubbles preserved — retrying before STALE.
@@ -612,5 +768,5 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
   );
 }
 
-// Constant for display (matches monitorLoop RETRY_DELAYS length)
+// Constant for display
 const RETRY_DELAYS_COUNT = 3;
