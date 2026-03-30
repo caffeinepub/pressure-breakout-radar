@@ -62,6 +62,19 @@ export function Top10Card({ candidate, index }: Top10CardProps) {
 
   const rankStr = String(candidate.rank).padStart(2, "0");
 
+  // 3TF alignment badge
+  const tfAlignment = candidate.tfAlignment;
+  const tfBadgeLabel =
+    tfAlignment === "3TF_ALIGNED"
+      ? "3TF"
+      : tfAlignment === "5M_CONFIRMED"
+        ? "5M+"
+        : null;
+  const tfBadgeColor =
+    tfAlignment === "3TF_ALIGNED"
+      ? "text-radar-cyan border-radar-cyan/40 bg-radar-cyan/10"
+      : "text-radar-dim border-radar-dim/30 bg-transparent";
+
   return (
     <button
       type="button"
@@ -129,12 +142,26 @@ export function Top10Card({ candidate, index }: Top10CardProps) {
           </div>
         </div>
 
-        {/* Row 5: Vacuum + Pressure side */}
+        {/* Row 5: Vacuum + Pressure side + 3TF badge */}
         <div className="flex items-center justify-between pl-10">
-          <span className="text-[10px] text-radar-dim">
-            Vacuum:{" "}
-            <span className={`font-bold ${vacuumColor}`}>{vacuumSide}</span>
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-radar-dim">
+              Vacuum:{" "}
+              <span className={`font-bold ${vacuumColor}`}>{vacuumSide}</span>
+            </span>
+            {/* Scan context label */}
+            <span className="text-[9px] text-radar-dim/50 font-mono">
+              1M·5M·15M
+            </span>
+            {/* 3TF alignment badge */}
+            {tfBadgeLabel && (
+              <span
+                className={`text-[9px] font-bold font-mono px-1 py-0.5 rounded border ${tfBadgeColor}`}
+              >
+                {tfBadgeLabel}
+              </span>
+            )}
+          </div>
           <span className={`text-[10px] font-bold ${pressureColor}`}>
             {pressure.side !== "NEUTRAL" && (
               <>

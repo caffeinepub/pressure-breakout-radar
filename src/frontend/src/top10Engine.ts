@@ -1,6 +1,6 @@
 import type { Candidate, Phase } from "./types";
 
-const PHASE_PRIORITY: Record<Phase, number> = {
+export const PHASE_PRIORITY: Record<Phase, number> = {
   "PRE-BURST": 5,
   BUILDING: 4,
   ACTIVE: 3,

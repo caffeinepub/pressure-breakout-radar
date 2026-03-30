@@ -15,12 +15,21 @@ import {
 } from "./scoringEngine";
 import { useHealthStore } from "./stores/healthStore";
 import { validateSymbols } from "./symbolValidator";
-import { selectTop10 } from "./top10Engine";
+import { runThreeTFGate } from "./threeTFGate";
+import { PHASE_PRIORITY, selectTop10 } from "./top10Engine";
 import type { AppStatus, Candidate, LivePatch } from "./types";
 
 const DISCOVERY_INTERVAL_MS = 90_000;
 const LIVE_INTERVAL_MS = 5_000;
 const MAX_SCAN_SYMBOLS = 150;
+
+/** Minimum 1m signal strength required to become a pre-candidate for the 3TF gate */
+const PRE_CANDIDATE_PRESSURE_MIN = 70;
+const PRE_CANDIDATE_BREAKOUT_MIN = 45;
+/** How many pre-candidates to gate with 5m/15m before selecting final Top 10 */
+const PRE_CANDIDATE_LIMIT = 20;
+/** Minimum gated candidates before we trust the gate result (else fallback) */
+const GATE_FALLBACK_THRESHOLD = 3;
 
 const RETRY_DELAYS = [2000, 5000, 10000];
 
@@ -110,7 +119,7 @@ export function startDiscoveryLoop(
         .slice(0, MAX_SCAN_SYMBOLS);
       const symbolsToScan = sortedByVolume.map((t) => t.symbol);
 
-      // 3. Klines batch
+      // 3. Klines batch (1m — broad discovery)
       const klinesMap = await fetchKlinesBatch(symbolsToScan, "1m", 50, 20);
       if (cancelled) {
         inFlight = false;
@@ -118,7 +127,7 @@ export function startDiscoveryLoop(
         return;
       }
 
-      // 4. Score — per-symbol safety
+      // 4. Score 1m — per-symbol safety
       const candidates: Omit<Candidate, "rank">[] = [];
       for (const ticker of sortedByVolume) {
         try {
@@ -148,7 +157,49 @@ export function startDiscoveryLoop(
         }
       }
 
-      const top10 = selectTop10(candidates);
+      // 5. Pre-filter to top 20 1m pre-candidates for the 3TF gate
+      //    Requirements: pressure >= 70, breakoutScore >= 45, bias not NEUTRAL
+      const preCandidates = candidates
+        .filter(
+          (c) =>
+            c.pressure.strength >= PRE_CANDIDATE_PRESSURE_MIN &&
+            c.breakoutScore >= PRE_CANDIDATE_BREAKOUT_MIN &&
+            c.pressure.side !== "NEUTRAL",
+        )
+        .sort((a, b) => {
+          const pDiff = PHASE_PRIORITY[b.phase] - PHASE_PRIORITY[a.phase];
+          if (pDiff !== 0) return pDiff;
+          return b.breakoutScore - a.breakoutScore;
+        })
+        .slice(0, PRE_CANDIDATE_LIMIT);
+
+      // 6. Run lightweight 3TF gate on top 20 pre-candidates
+      //    Fetches 5m + 15m klines and applies quality filters.
+      //    Re-run every slow scan cycle; result is stable until next scan.
+      let top10: Candidate[];
+
+      if (preCandidates.length >= 1) {
+        let gated: Awaited<ReturnType<typeof runThreeTFGate>> = [];
+        try {
+          gated = await runThreeTFGate(preCandidates);
+        } catch (gateErr) {
+          console.warn("[3TF gate] failed, falling back to 1m-only:", gateErr);
+        }
+
+        if (gated.length >= GATE_FALLBACK_THRESHOLD) {
+          // Gate produced enough quality candidates — use the gated result
+          top10 = gated.slice(0, 10).map((c, i) => ({ ...c, rank: i + 1 }));
+        } else {
+          // Gate was too strict (rare market condition) — fall back to pure 1m
+          console.info(
+            `[3TF gate] only ${gated.length} passed, using 1m fallback`,
+          );
+          top10 = selectTop10(candidates);
+        }
+      } else {
+        // Not enough strong 1m pre-candidates — fall back to pure 1m selectTop10
+        top10 = selectTop10(candidates);
+      }
 
       if (top10.length === 0) {
         if (!hasCachedFallback) onStatusChange("ERROR");

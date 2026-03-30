@@ -2,41 +2,71 @@
 
 ## Current State
 
-Aggression bubbles are rendered in `CandlestickChart.tsx` with a `drawBubble` function and a clustering pass. Current state:
-- Bubbles sorted weakest-first so strongest renders on top
-- `clusterBubbles` in `monitorLoop.ts` keeps only the strongest bubble per 3-candle zone per side
-- Minor cluster bubbles get 0.8 × 0.65 = 0.52 alpha vs 0.80 for dominant
-- Radius comes from `getBubbleRadius` with 4 tiers: 10/14/18/22 based on strength thresholds 0/25/50/75
-- No age-based fading — all bubbles render at the same base alpha regardless of age
-- No micro-zone spatial proximity check between different candle zones — only within same 3-candle zone bucket
-- Glow uses `shadowBlur = r * 0.7` which can still be heavy
-- No protection from execution label overlap beyond z-order
+Top 10 discovery is a pure 1m process:
+- `updateLoops.ts` scans 150 symbols, fetches 1m klines, scores each with `computeTension / computePressure / computeBreakoutScore`
+- `selectTop10` ranks by phase priority + breakoutScore and takes the best 10
+- No multi-timeframe gating exists — pure 1m noise can dominate the list
 
 ## Requested Changes (Diff)
 
 ### Add
-- Age-based opacity fade: compute age fraction from bubble's `candleOpenTime` vs the newest bubble's time. Divide into 4 age bands: fresh (0–25%), recent (25–50%), older (50–75%), near-expiring (75–100%). Apply fade multipliers: 1.0, 0.85, 0.65, 0.42.
-- Micro-zone spatial proximity check in the render pass: if two same-side bubbles are within `r1 + r2 + 8px` of each other in screen-space, the weaker one gets an additional 0.55 multiplier on alpha so the stronger clearly dominates visually.
-- Execution label proximity check: if bubble center is within `r + 20px` of any ENTRY/SL/TP label screen position, reduce that bubble's glow (shadowBlur cap to `r * 0.3`) and alpha by × 0.7 so labels remain readable.
+- `threeTFGate.ts` — new module containing:
+  - `computeLightweight5m(klines)` → `{ bias, pressureDirection, pressureProxy, breakoutScoreProxy }`
+  - `computeLightweight15m(klines, candidateDirection)` → `{ bias, biasStrength, rangeContext, contextVerdict, contextSupport }`
+  - `runThreeTFGate(preCandidates)` — fetches 5m+15m klines for the symbols, gates, scores, returns `GatedCandidate[]`
+- `tfAlignment?: "3TF_ALIGNED" | "5M_CONFIRMED"` field on `Candidate` type
+- `top10QualityScore?: number` field on `Candidate` type
+- Small badge in `Top10Card` showing `3TF ALIGNED` or `5M+1M` when tfAlignment is present
+- `SCAN: 1M · 5M · 15M` context label in `Top10Card`
 
 ### Modify
-- `getBubbleRadius` tier sizes: cap extreme tier at 20 (was 22), strong at 16 (was 18), medium at 12 (was 14), weak at 8 (was 10). Slightly smaller overall so bubbles are less overpowering on mobile.
-- Base alpha: raise dominant bubble base alpha to 0.85 (was 0.80) so the strongest is clearly the loudest. Keep minor alpha at 0.52 or lower.
-- `drawBubble` glow: reduce `shadowBlur` from `r * 0.7` to `r * 0.5`. Reduce shadow alpha in color from 0.35 to 0.25. Keeps the suggestion without heavy glow noise.
-- Cluster zone size in `clusterBubbles`: change zone bucket from `Math.floor(ci / 3)` to `Math.floor(ci / 2)` for 1m (tighter clustering), keep 3 for 5m/15m — controlled via timeframe parameter already passed.
-- Render pass sort: keep weakest-first sort for z-ordering. The visual dominance for strength is handled by alpha + size.
+- `updateLoops.ts` — after 1m scoring, apply pre-filter (pressure >= 70, breakoutScore >= 45, pressure.side != NEUTRAL), sort by phase+score, take top 20, run `runThreeTFGate`, sort result by `top10QualityScore`, take top 10. Fallback to existing `selectTop10` if gated set < 3.
+- `top10Engine.ts` — export `PHASE_PRIORITY` constant for reuse in `updateLoops.ts`
+- `types.ts` — add `tfAlignment` and `top10QualityScore` optional fields to `Candidate`
+- `Top10Card.tsx` — render tfAlignment badge and scan label in bottom row
 
 ### Remove
-- Nothing removed; pure improvement/tuning pass.
+- Nothing removed; existing pure-1m `selectTop10` stays as fallback
 
 ## Implementation Plan
 
-1. **`monitorLoop.ts`**: In `getBubbleRadius`, reduce all tier caps: extreme→20, strong→16, medium→12, weak→8.
-2. **`CandlestickChart.tsx` — `drawBubble`**: Reduce `shadowBlur` to `r * 0.5`, shadow alpha from 0.35 → 0.25.
-3. **`CandlestickChart.tsx` — bubble render loop**:
-   a. Before the loop, compute `newestBubbleTime = max(candleOpenTime across all visible bubbles)` and `oldestBubbleTime = min(...)`. Compute age fraction per bubble.
-   b. Age fade lookup: fresh→1.0, recent→0.85, older→0.65, near-expiring→0.42.
-   c. Raise dominant base alpha to 0.85. Minor in cluster → 0.85 × 0.60.
-   d. After computing `finalBy` and `bx` for each bubble, scan already-placed positions for same-side bubbles within `r + placed.r + 8`. If any found, apply additional × 0.55 to alpha (in addition to any minor-cluster flag).
-   e. Collect label screen positions (ENTRY, SL, TP1, TP2) from the zones already drawn. Before calling `drawBubble`, check if `(bx, finalBy)` is within `r + 20` of any label. If so: cap glow to `r * 0.3` and reduce final alpha × 0.7.
-4. Validate with typecheck + build.
+1. Create `threeTFGate.ts` with lightweight computation functions and gate logic
+2. Update `types.ts` with two new optional fields on `Candidate`
+3. Update `top10Engine.ts` to export `PHASE_PRIORITY`
+4. Update `updateLoops.ts` to integrate pre-filter → `runThreeTFGate` → final Top 10 each slow scan cycle
+5. Update `Top10Card.tsx` to show alignment badge and scan label
+
+### Gate flow (per slow scan cycle)
+```
+1. Score 1m candidates as now
+2. Pre-filter: pressure.strength >= 70 && breakoutScore >= 45 && pressure.side != NEUTRAL
+3. Sort by phase priority + breakoutScore → take top 20
+4. For those 20: fetch 5m (last 20 candles) + 15m (last 20 candles) in parallel
+5. Per candidate:
+   a. Derive direction from pressure.side (UP→LONG, DOWN→SHORT)
+   b. Compute lightweight5m → apply 5m gate (reject if 5m clearly contradicts 1m)
+   c. Compute lightweight15m for candidate direction → apply 15m gate (reject if HOSTILE)
+   d. Compute Top10QualityScore = 0.50*bs1m + 0.25*pressure1m + 0.15*bs5m + 0.10*support15m
+   e. Assign tfAlignment: 3TF_ALIGNED (support=100) or 5M_CONFIRMED (support=60)
+6. Sort gated by Top10QualityScore → take top 10 → assign ranks
+7. Fallback to selectTop10(all candidates) if gated.length < 3
+```
+
+### Lightweight computation rules
+- 5m bias: close position in 20-candle range + last-5-candle directional count
+- 5m pressure proxy: directional body/range aggregation over last 10 candles
+- 5m breakoutScore proxy: direction consistency + close location + continuation (last 3 candles)
+- 15m bias: close position + bull/bear candle ratio over last 20 candles
+- 15m rangeContext: UPPER (pos > 0.65) / LOWER (pos < 0.35) / MID
+- 15m contextVerdict for LONG: HOSTILE if 15m SHORT bias strong; SUPPORTIVE if 15m LONG or NEUTRAL+not upper range
+- 15m contextVerdict for SHORT: HOSTILE if 15m LONG bias strong; SUPPORTIVE if 15m SHORT or NEUTRAL+not lower range
+
+### 5m contradiction rules
+- LONG candidate: reject if bias_5m === SHORT, or bias NEUTRAL + pressureDir SHORT + proxy >= 60
+- SHORT candidate: reject if bias_5m === LONG, or bias NEUTRAL + pressureDir LONG + proxy >= 60
+
+### Top10QualityScore
+```
+0.50 * breakoutScore_1m + 0.25 * pressure_1m + 0.15 * breakoutScore_5m + 0.10 * contextSupport_15m
+contextSupport_15m: 100 (SUPPORTIVE) | 60 (NEUTRAL) | 0 (HOSTILE — already rejected)
+```

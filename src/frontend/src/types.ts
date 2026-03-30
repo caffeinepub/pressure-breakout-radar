@@ -28,6 +28,10 @@ export interface Candidate {
   breakoutScore: number;
   phase: Phase;
   vacuumSide: VacuumSide;
+  /** Set when the 3TF gate has run — indicates multi-timeframe alignment quality */
+  tfAlignment?: "3TF_ALIGNED" | "5M_CONFIRMED";
+  /** Composite quality score used for ranking when 3TF gate has run */
+  top10QualityScore?: number;
 }
 
 export interface LivePatch {
