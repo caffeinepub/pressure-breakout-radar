@@ -1,3 +1,4 @@
+import type { PersistentExecutionState } from "./executionStateMachine";
 export type Phase = "FLAT" | "BUILDING" | "PRE-BURST" | "ACTIVE" | "BREAKOUT";
 export type PressureSide = "UP" | "DOWN" | "NEUTRAL";
 export type VacuumSide = "ABOVE" | "BELOW" | "NONE";
@@ -192,4 +193,12 @@ export interface SelectedMonitorSnapshot {
   timeframe?: "1m" | "5m" | "15m";
   vacuumZone?: VacuumZone;
   executionContext?: ExecutionContext;
+  executionMachineState?: PersistentExecutionState;
 }
+
+// Re-exported types from executionStateMachine for convenience
+export type {
+  ExecutionMachineState,
+  InvalidationReason,
+  PersistentExecutionState,
+} from "./executionStateMachine";

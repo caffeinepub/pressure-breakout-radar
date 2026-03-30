@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { PersistentExecutionState } from "../../executionStateMachine";
 import type {
   AggressionBubble,
   ExecutionContext,
@@ -15,6 +16,7 @@ interface CandlestickChartProps {
   vacuumZone?: VacuumZone;
   timeframe?: "1m" | "5m" | "15m";
   executionContext?: ExecutionContext;
+  machineState?: PersistentExecutionState;
 }
 
 const PADDING_RATIOS = { compact: 0.05, standard: 0.08, wide: 0.13 };
@@ -61,6 +63,7 @@ export function CandlestickChart({
   vacuumZone,
   timeframe = "1m",
   executionContext,
+  machineState,
 }: CandlestickChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isLivePaused, setIsLivePaused] = useState(false);
@@ -73,6 +76,7 @@ export function CandlestickChart({
     vacuumZone: undefined as VacuumZone | undefined,
     timeframe: "1m" as "1m" | "5m" | "15m",
     executionContext: undefined as ExecutionContext | undefined,
+    machineState: undefined as PersistentExecutionState | undefined,
     zoom: 1,
     panOffset: 0,
     liveModePaused: false,
@@ -412,87 +416,187 @@ export function CandlestickChart({
       }
     }
 
+    // === MACHINE-STATE-AWARE EXECUTION ZONE RESOLUTION ===
     const ec = stateRef.current.executionContext;
-    const hasValidExec =
-      ec?.entryBias &&
-      ec.entryBias !== "NEUTRAL" &&
-      (ec.executionValidityState === "VALID_LONG" ||
-        ec.executionValidityState === "VALID_SHORT" ||
-        ec.executionValidityState === "RECLAIM_LONG" ||
-        ec.executionValidityState === "RECLAIM_SHORT");
+    const ms = stateRef.current.machineState;
 
-    if (hasValidExec && ec) {
-      const isLong = ec.entryBias === "LONG";
+    // Resolve which zones to draw and at what alpha
+    let drawZones = false;
+    let zoneAlpha = 1.0;
+    let isFadingOut = false;
+    let tp1Hit = false;
+    let tp2Hit = false;
+    let isLongDir = false;
+    let zoneEntry: { start: number; end: number } | null = null;
+    let zoneSl: { start: number; end: number } | null = null;
+    let zoneTp1: { start: number; end: number } | null = null;
+    let zoneTp2: { start: number; end: number } | null = null;
+
+    if (ms && ms.state !== "NO_SETUP") {
+      const msState = ms.state;
+      isLongDir = ms.direction === "LONG";
+      zoneEntry = ms.entryZone;
+      zoneSl = ms.slZone;
+      zoneTp1 = ms.tp1Zone;
+      zoneTp2 = ms.tp2Zone;
+
+      if (msState === "BUILDING") {
+        drawZones = !!(zoneEntry && zoneSl);
+        zoneAlpha = 0.32; // faint projected zones
+      } else if (msState === "READY") {
+        drawZones = !!(zoneEntry && zoneSl && zoneTp1);
+        zoneAlpha = 1.0;
+      } else if (msState === "ACTIVE") {
+        drawZones = !!(zoneEntry && zoneSl && zoneTp1);
+        zoneAlpha = 1.0;
+      } else if (msState === "TP1_HIT") {
+        drawZones = !!(zoneEntry && zoneSl && zoneTp1);
+        zoneAlpha = 1.0;
+        tp1Hit = true;
+      } else if (msState === "TP2_HIT") {
+        drawZones = !!(zoneEntry && zoneSl && zoneTp1);
+        zoneAlpha = 0.75;
+        tp1Hit = true;
+        tp2Hit = true;
+      } else if (msState === "INVALIDATED") {
+        const fadeProgress = Math.min(1, (ms.invalidatedFadeMs ?? 0) / 3500);
+        zoneAlpha = Math.max(0, 1 - fadeProgress) * 0.55;
+        drawZones = zoneAlpha > 0.04;
+        isFadingOut = true;
+      }
+    } else if (!ms) {
+      // Fallback: no machine state — use legacy ec validity
+      const hasValidExecFallback =
+        ec?.entryBias &&
+        ec.entryBias !== "NEUTRAL" &&
+        (ec.executionValidityState === "VALID_LONG" ||
+          ec.executionValidityState === "VALID_SHORT" ||
+          ec.executionValidityState === "RECLAIM_LONG" ||
+          ec.executionValidityState === "RECLAIM_SHORT");
+      if (hasValidExecFallback && ec) {
+        drawZones = true;
+        isLongDir = ec.entryBias === "LONG";
+        zoneEntry = ec.entryZone;
+        zoneSl = ec.slZone;
+        zoneTp1 = ec.tp1Zone;
+        zoneTp2 = ec.tp2Zone ?? null;
+      }
+    }
+
+    // Helper to scale alpha for a given base value
+    function scaleAlpha(base: number): number {
+      return base * zoneAlpha;
+    }
+
+    const hasValidExec = drawZones;
+    if (hasValidExec) {
+      const isLong = isLongDir;
 
       // --- FIRST PASS: fills + border lines only (no label chips) ---
-      if (ec.slZone) {
+      if (zoneSl) {
         drawZoneBand(
           ctx,
-          ec.slZone.start,
-          ec.slZone.end,
-          isLong ? "rgba(220,60,60,0.10)" : "rgba(220,120,40,0.10)",
-          isLong ? "rgba(220,60,60,0.42)" : "rgba(220,120,40,0.42)",
+          zoneSl.start,
+          zoneSl.end,
+          isLong
+            ? `rgba(220,60,60,${scaleAlpha(0.1)})`
+            : `rgba(220,120,40,${scaleAlpha(0.1)})`,
+          isLong
+            ? `rgba(220,60,60,${scaleAlpha(0.42)})`
+            : `rgba(220,120,40,${scaleAlpha(0.42)})`,
           "SL",
-          isLong ? "rgba(220,60,60,0.55)" : "rgba(220,120,40,0.55)",
+          isLong
+            ? `rgba(220,60,60,${scaleAlpha(0.55)})`
+            : `rgba(220,120,40,${scaleAlpha(0.55)})`,
           isLong ? "bottom" : "top",
           false,
         );
       }
 
-      if (ec.tp2Zone) {
+      if (zoneTp2) {
+        const tp2Label = tp2Hit ? "TP2 ✓" : "TP2";
         drawZoneBand(
           ctx,
-          ec.tp2Zone.start,
-          ec.tp2Zone.end,
-          isLong ? "rgba(0,160,200,0.07)" : "rgba(100,80,200,0.07)",
-          isLong ? "rgba(0,160,200,0.28)" : "rgba(100,80,200,0.28)",
-          "TP2",
-          isLong ? "rgba(0,180,220,0.50)" : "rgba(120,100,220,0.50)",
+          zoneTp2.start,
+          zoneTp2.end,
+          isLong
+            ? `rgba(0,160,200,${scaleAlpha(0.07)})`
+            : `rgba(100,80,200,${scaleAlpha(0.07)})`,
+          isLong
+            ? `rgba(0,160,200,${scaleAlpha(0.28)})`
+            : `rgba(100,80,200,${scaleAlpha(0.28)})`,
+          tp2Label,
+          isLong
+            ? `rgba(0,180,220,${scaleAlpha(0.5)})`
+            : `rgba(120,100,220,${scaleAlpha(0.5)})`,
           isLong ? "top" : "bottom",
           false,
         );
       }
 
-      if (ec.tp1Zone) {
+      if (zoneTp1) {
+        const tp1Label = tp1Hit ? "TP1 ✓" : "TP1";
         drawZoneBand(
           ctx,
-          ec.tp1Zone.start,
-          ec.tp1Zone.end,
-          isLong ? "rgba(0,180,220,0.13)" : "rgba(120,80,220,0.13)",
-          isLong ? "rgba(0,180,220,0.55)" : "rgba(120,80,220,0.55)",
-          "TP1",
-          isLong ? "rgba(0,200,240,0.60)" : "rgba(140,100,240,0.60)",
+          zoneTp1.start,
+          zoneTp1.end,
+          isLong
+            ? `rgba(0,180,220,${scaleAlpha(0.13)})`
+            : `rgba(120,80,220,${scaleAlpha(0.13)})`,
+          isLong
+            ? `rgba(0,180,220,${tp1Hit ? scaleAlpha(0.7) : scaleAlpha(0.55)})`
+            : `rgba(120,80,220,${tp1Hit ? scaleAlpha(0.7) : scaleAlpha(0.55)})`,
+          tp1Label,
+          isLong
+            ? `rgba(0,200,240,${scaleAlpha(0.6)})`
+            : `rgba(140,100,240,${scaleAlpha(0.6)})`,
           isLong ? "top" : "bottom",
           false,
         );
       }
 
-      if (ec.entryZone) {
+      if (zoneEntry) {
+        const entryLabel =
+          ms?.state === "ACTIVE"
+            ? "ACTIVE"
+            : ms?.state === "TP1_HIT"
+              ? "ENTRY ✓"
+              : "ENTRY";
         drawZoneBand(
           ctx,
-          ec.entryZone.start,
-          ec.entryZone.end,
-          isLong ? "rgba(0,200,100,0.16)" : "rgba(200,60,120,0.16)",
-          isLong ? "rgba(0,200,100,0.65)" : "rgba(200,60,120,0.65)",
-          "ENTRY",
-          isLong ? "rgba(0,220,110,0.70)" : "rgba(220,80,140,0.70)",
+          zoneEntry.start,
+          zoneEntry.end,
+          isLong
+            ? `rgba(0,200,100,${scaleAlpha(0.16)})`
+            : `rgba(200,60,120,${scaleAlpha(0.16)})`,
+          isLong
+            ? `rgba(0,200,100,${scaleAlpha(0.65)})`
+            : `rgba(200,60,120,${scaleAlpha(0.65)})`,
+          entryLabel,
+          isLong
+            ? `rgba(0,220,110,${scaleAlpha(0.7)})`
+            : `rgba(220,80,140,${scaleAlpha(0.7)})`,
           "top",
           false,
         );
       }
 
-      // Trigger line (dashed)
-      const triggerPrice = isLong
-        ? (ec.entryZone?.start ?? 0)
-        : (ec.entryZone?.end ?? 0);
+      // Trigger line (dashed) — only for READY or fallback
+      const showTriggerLine =
+        !ms || ms.state === "READY" || ms.state === "BUILDING";
+      const triggerPrice = showTriggerLine
+        ? isLong
+          ? (zoneEntry?.start ?? 0)
+          : (zoneEntry?.end ?? 0)
+        : 0;
       if (triggerPrice > 0) {
         const trigY = toY(triggerPrice);
         if (trigY >= topMargin && trigY <= topMargin + chartH) {
           ctx.save();
           ctx.setLineDash([5, 4]);
           ctx.strokeStyle = isLong
-            ? "rgba(0,200,100,0.35)"
-            : "rgba(200,60,120,0.35)";
+            ? `rgba(0,200,100,${scaleAlpha(0.35)})`
+            : `rgba(200,60,120,${scaleAlpha(0.35)})`;
           ctx.lineWidth = 1;
           ctx.beginPath();
           ctx.moveTo(leftMargin, trigY);
@@ -688,63 +792,103 @@ export function CandlestickChart({
     }
 
     // === SECOND PASS: Execution zone label chips (on top of bubbles) ===
-    if (hasValidExec && ec) {
-      const isLong = ec.entryBias === "LONG";
+    if (hasValidExec) {
+      const isLong = isLongDir;
 
-      if (ec.slZone) {
+      if (zoneSl) {
         drawZoneBand(
           ctx,
-          ec.slZone.start,
-          ec.slZone.end,
+          zoneSl.start,
+          zoneSl.end,
           "",
-          isLong ? "rgba(220,60,60,0.42)" : "rgba(220,120,40,0.42)",
+          isLong
+            ? `rgba(220,60,60,${scaleAlpha(0.42)})`
+            : `rgba(220,120,40,${scaleAlpha(0.42)})`,
           "SL",
-          isLong ? "rgba(220,60,60,0.55)" : "rgba(220,120,40,0.55)",
+          isLong
+            ? `rgba(220,60,60,${scaleAlpha(0.55)})`
+            : `rgba(220,120,40,${scaleAlpha(0.55)})`,
           isLong ? "bottom" : "top",
           true,
         );
       }
 
-      if (ec.tp2Zone) {
+      if (zoneTp2) {
+        const tp2Label = tp2Hit ? "TP2 ✓" : "TP2";
         drawZoneBand(
           ctx,
-          ec.tp2Zone.start,
-          ec.tp2Zone.end,
+          zoneTp2.start,
+          zoneTp2.end,
           "",
-          isLong ? "rgba(0,160,200,0.28)" : "rgba(100,80,200,0.28)",
-          "TP2",
-          isLong ? "rgba(0,180,220,0.50)" : "rgba(120,100,220,0.50)",
+          isLong
+            ? `rgba(0,160,200,${scaleAlpha(0.28)})`
+            : `rgba(100,80,200,${scaleAlpha(0.28)})`,
+          tp2Label,
+          isLong
+            ? `rgba(0,180,220,${scaleAlpha(0.5)})`
+            : `rgba(120,100,220,${scaleAlpha(0.5)})`,
           isLong ? "top" : "bottom",
           true,
         );
       }
 
-      if (ec.tp1Zone) {
+      if (zoneTp1) {
+        const tp1Label = tp1Hit ? "TP1 ✓" : "TP1";
         drawZoneBand(
           ctx,
-          ec.tp1Zone.start,
-          ec.tp1Zone.end,
+          zoneTp1.start,
+          zoneTp1.end,
           "",
-          isLong ? "rgba(0,180,220,0.55)" : "rgba(120,80,220,0.55)",
-          "TP1",
-          isLong ? "rgba(0,200,240,0.60)" : "rgba(140,100,240,0.60)",
+          isLong
+            ? `rgba(0,180,220,${tp1Hit ? scaleAlpha(0.7) : scaleAlpha(0.55)})`
+            : `rgba(120,80,220,${tp1Hit ? scaleAlpha(0.7) : scaleAlpha(0.55)})`,
+          tp1Label,
+          isLong
+            ? `rgba(0,200,240,${scaleAlpha(0.6)})`
+            : `rgba(140,100,240,${scaleAlpha(0.6)})`,
           isLong ? "top" : "bottom",
           true,
         );
       }
 
-      if (ec.entryZone) {
+      if (zoneEntry) {
+        const entryLabel =
+          ms?.state === "ACTIVE"
+            ? "ACTIVE"
+            : ms?.state === "TP1_HIT" || ms?.state === "TP2_HIT"
+              ? "ENTRY ✓"
+              : "ENTRY";
         drawZoneBand(
           ctx,
-          ec.entryZone.start,
-          ec.entryZone.end,
+          zoneEntry.start,
+          zoneEntry.end,
           "",
-          isLong ? "rgba(0,200,100,0.65)" : "rgba(200,60,120,0.65)",
-          "ENTRY",
-          isLong ? "rgba(0,220,110,0.70)" : "rgba(220,80,140,0.70)",
+          isLong
+            ? `rgba(0,200,100,${scaleAlpha(0.65)})`
+            : `rgba(200,60,120,${scaleAlpha(0.65)})`,
+          entryLabel,
+          isLong
+            ? `rgba(0,220,110,${scaleAlpha(0.7)})`
+            : `rgba(220,80,140,${scaleAlpha(0.7)})`,
           "top",
           true,
         );
+      }
+
+      // INVALIDATED marker — brief flash before clearing
+      if (isFadingOut && zoneAlpha > 0.1) {
+        const invalidY = zoneEntry
+          ? toY((zoneEntry.start + zoneEntry.end) / 2)
+          : -1;
+        if (invalidY >= topMargin && invalidY <= topMargin + chartH) {
+          ctx.save();
+          ctx.globalAlpha = zoneAlpha * 0.9;
+          ctx.font = "bold 9px GeistMono, monospace";
+          ctx.fillStyle = "rgba(220,60,60,0.9)";
+          ctx.textAlign = "center";
+          ctx.fillText("✕ INVALIDATED", leftMargin + chartW / 2, invalidY - 4);
+          ctx.restore();
+        }
       }
     }
 
@@ -811,6 +955,12 @@ export function CandlestickChart({
     stateRef.current.executionContext = executionContext;
     scheduleRedraw();
   }, [executionContext]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional ref-based update pattern
+  useEffect(() => {
+    stateRef.current.machineState = machineState;
+    scheduleRedraw();
+  }, [machineState]);
 
   // When timeframe changes: reset live mode and scale
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional ref-based update pattern

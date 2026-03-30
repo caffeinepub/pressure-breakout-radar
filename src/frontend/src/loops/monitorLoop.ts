@@ -9,6 +9,7 @@ import {
 import { fetchAllTickers, fetchKlines, parseKlines } from "../binanceApi";
 import type { BinanceAggTrade } from "../binanceApi";
 import { getCache, setCache } from "../cache";
+import { advanceExecutionStateMachine } from "../executionStateMachine";
 import { setRuntimeMode } from "../runtimeCore";
 import {
   assignPhase,
@@ -605,6 +606,7 @@ export function startMonitorLoop(
           pressureTrend,
           tensionTrend,
           aggressionBubbles,
+          timeframe,
         );
 
         const isReclaimActive =
@@ -682,6 +684,12 @@ export function startMonitorLoop(
         timeframe,
         vacuumZone,
         executionContext,
+        executionMachineState: advanceExecutionStateMachine(
+          symbol,
+          timeframe,
+          currentPrice,
+          executionContext ?? null,
+        ),
       };
 
       setCache(`monitor_${symbol}_${timeframe}`, snapshot, 8000);

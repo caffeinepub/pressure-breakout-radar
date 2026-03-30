@@ -372,6 +372,7 @@ function computeReclaimSetup(
   pressure: PressureResult,
   pressureTrend: TrendDirection,
   rangePosition: RangePosition,
+  tfScale = 1.0,
 ): ReclaimSetup | null {
   const rangeSize = Math.max(upperStructure - lowerStructure, atr * 3);
 
@@ -384,15 +385,15 @@ function computeReclaimSetup(
       if (currentPrice > bearishCluster.highPrice + reclaimBuffer) {
         // Price reclaimed above the bearish cluster — potential LONG reclaim
         const entryZone: ExecutionZone = {
-          start: bearishCluster.centerPrice - atr * 0.2,
-          end: bearishCluster.highPrice + atr * 0.2,
+          start: bearishCluster.centerPrice - atr * 0.2 * tfScale,
+          end: bearishCluster.highPrice + atr * 0.2 * tfScale,
         };
         const slZone: ExecutionZone = {
-          start: bearishCluster.lowPrice - atr * 0.5,
+          start: bearishCluster.lowPrice - atr * 0.5 * tfScale,
           end: bearishCluster.lowPrice - atr * 0.05,
         };
         // No-chase: price too far above the reclaim zone (wait for retest back to zone)
-        const isExtended = currentPrice > entryZone.end + atr * 1.5;
+        const isExtended = currentPrice > entryZone.end + atr * 1.5 * tfScale;
 
         // Quality: based on confirmation signals
         const confirmations = [
@@ -417,15 +418,15 @@ function computeReclaimSetup(
       if (currentPrice < bullishCluster.lowPrice - reclaimBuffer) {
         // Price broke below the bullish cluster — potential SHORT reclaim
         const entryZone: ExecutionZone = {
-          start: bullishCluster.lowPrice - atr * 0.2,
-          end: bullishCluster.centerPrice + atr * 0.2,
+          start: bullishCluster.lowPrice - atr * 0.2 * tfScale,
+          end: bullishCluster.centerPrice + atr * 0.2 * tfScale,
         };
         const slZone: ExecutionZone = {
           start: bullishCluster.highPrice + atr * 0.05,
-          end: bullishCluster.highPrice + atr * 0.5,
+          end: bullishCluster.highPrice + atr * 0.5 * tfScale,
         };
         // No-chase: price too far below the reclaim zone
-        const isExtended = currentPrice < entryZone.start - atr * 1.5;
+        const isExtended = currentPrice < entryZone.start - atr * 1.5 * tfScale;
 
         const confirmations = [
           pressure.side !== "UP",
@@ -464,6 +465,7 @@ export function computeExecutionContext(
   pressureTrend: TrendDirection,
   tensionTrend: TrendDirection,
   aggressionBubbles: AggressionBubble[] = [],
+  timeframe = "1m",
 ): ExecutionContext {
   const { upperStructure, lowerStructure, bias } = breakoutContext;
   const rangeSpan = Math.max(
@@ -549,6 +551,9 @@ export function computeExecutionContext(
 
   const atr = computeATR(klines);
 
+  // Timeframe zone scaling: 15m is slower/cleaner — widen all structural buffers
+  const tfScale = timeframe === "15m" ? 1.6 : timeframe === "5m" ? 1.1 : 1.0;
+
   if (hasCleanEntry) {
     if (entryBias === "LONG") {
       // =======================================================================
@@ -568,9 +573,12 @@ export function computeExecutionContext(
         // Build entry zone around the cluster
         const spread = Math.max(
           bullishCluster.highPrice - bullishCluster.lowPrice,
-          atr * 0.2,
+          atr * 0.2 * tfScale,
         );
-        const zoneHalf = Math.max(atr * 0.3, spread / 2 + atr * 0.1);
+        const zoneHalf = Math.max(
+          atr * 0.3 * tfScale,
+          spread / 2 + atr * 0.1 * tfScale,
+        );
 
         idealLongEntryZone = {
           start: bullishCluster.centerPrice - zoneHalf,
@@ -579,7 +587,7 @@ export function computeExecutionContext(
 
         // NO-CHASE RULE: if price has run too far above the cluster, don't chase
         const noChaseLong =
-          currentPrice > bullishCluster.centerPrice + atr * 1.5;
+          currentPrice > bullishCluster.centerPrice + atr * 1.5 * tfScale;
 
         if (noChaseLong) {
           isNoChase = true;
@@ -597,7 +605,7 @@ export function computeExecutionContext(
               : clusterSupport;
 
           slZone = {
-            start: slBase - atr * 0.55,
+            start: slBase - atr * 0.55 * tfScale,
             end: slBase - atr * 0.05,
           };
 
@@ -610,8 +618,14 @@ export function computeExecutionContext(
             vacuumZone.side === "ABOVE" && vacuumZone.startPrice > 0
               ? (vacuumZone.startPrice + vacuumZone.endPrice) / 2
               : entryMid + R;
-          const tp1Price = Math.max(rawTp1Price, entryZone.end + atr * 0.3);
-          tp1Zone = { start: tp1Price - atr * 0.2, end: tp1Price + atr * 0.2 };
+          const tp1Price = Math.max(
+            rawTp1Price,
+            entryZone.end + atr * 0.3 * tfScale,
+          );
+          tp1Zone = {
+            start: tp1Price - atr * 0.2 * tfScale,
+            end: tp1Price + atr * 0.2 * tfScale,
+          };
           rMultiple = (tp1Price - entryMid) / R;
 
           // TP2: rational 3R target supported by vacuum
@@ -625,15 +639,15 @@ export function computeExecutionContext(
             const tp2Price = Math.min(tp2_3R, vacuumEnd);
             if (tp2Price > tp1Price) {
               tp2Zone = {
-                start: tp2Price - atr * 0.2,
-                end: tp2Price + atr * 0.2,
+                start: tp2Price - atr * 0.2 * tfScale,
+                end: tp2Price + atr * 0.2 * tfScale,
               };
               rMultiple = (tp2Price - entryMid) / R;
             }
           } else if (vacuumEnd >= entryMid + R * 1.5 && vacuumEnd > tp1Price) {
             tp2Zone = {
-              start: vacuumEnd - atr * 0.2,
-              end: vacuumEnd + atr * 0.2,
+              start: vacuumEnd - atr * 0.2 * tfScale,
+              end: vacuumEnd + atr * 0.2 * tfScale,
             };
             rMultiple = (vacuumEnd - entryMid) / R;
             structurallyLimited = true;
@@ -666,9 +680,12 @@ export function computeExecutionContext(
         // Build entry zone around the cluster
         const spread = Math.max(
           bearishCluster.highPrice - bearishCluster.lowPrice,
-          atr * 0.2,
+          atr * 0.2 * tfScale,
         );
-        const zoneHalf = Math.max(atr * 0.3, spread / 2 + atr * 0.1);
+        const zoneHalf = Math.max(
+          atr * 0.3 * tfScale,
+          spread / 2 + atr * 0.1 * tfScale,
+        );
 
         if (isOverheadVacuumShort) {
           // -------------------------------------------------------------------
@@ -688,12 +705,13 @@ export function computeExecutionContext(
           const slBase = vacuumZone.endPrice;
           const computedSlZone: ExecutionZone = {
             start: slBase,
-            end: slBase + atr * 0.5,
+            end: slBase + atr * 0.5 * tfScale,
           };
           vacuumInvalidationZone = computedSlZone;
 
           // NO-CHASE RULE: if price already extended well below the cluster
-          const noChasePriceThreshold = bearishCluster.centerPrice - atr * 1.5;
+          const noChasePriceThreshold =
+            bearishCluster.centerPrice - atr * 1.5 * tfScale;
           if (currentPrice < noChasePriceThreshold) {
             isNoChase = true;
           } else {
@@ -705,10 +723,13 @@ export function computeExecutionContext(
             const R = Math.max(slMid - entryMid, entryMid * 0.002);
 
             const rawTp1Price = entryMid - R;
-            const tp1Price = Math.min(rawTp1Price, entryZone.start - atr * 0.3);
+            const tp1Price = Math.min(
+              rawTp1Price,
+              entryZone.start - atr * 0.3 * tfScale,
+            );
             tp1Zone = {
-              start: tp1Price - atr * 0.2,
-              end: tp1Price + atr * 0.2,
+              start: tp1Price - atr * 0.2 * tfScale,
+              end: tp1Price + atr * 0.2 * tfScale,
             };
             rMultiple = (entryMid - tp1Price) / R;
 
@@ -716,8 +737,8 @@ export function computeExecutionContext(
             const tp1Mid = (tp1Zone.start + tp1Zone.end) / 2;
             if (tp2_3R < tp1Mid) {
               tp2Zone = {
-                start: tp2_3R - atr * 0.2,
-                end: tp2_3R + atr * 0.2,
+                start: tp2_3R - atr * 0.2 * tfScale,
+                end: tp2_3R + atr * 0.2 * tfScale,
               };
               rMultiple = (entryMid - tp2_3R) / R;
             } else {
@@ -739,7 +760,7 @@ export function computeExecutionContext(
 
           // NO-CHASE RULE: if price already dumped far below the cluster
           const noChaseShort =
-            currentPrice < bearishCluster.centerPrice - atr * 1.5;
+            currentPrice < bearishCluster.centerPrice - atr * 1.5 * tfScale;
 
           if (noChaseShort) {
             isNoChase = true;
@@ -750,7 +771,7 @@ export function computeExecutionContext(
             const slBase = bearishCluster.highPrice;
             slZone = {
               start: slBase + atr * 0.05,
-              end: slBase + atr * 0.55,
+              end: slBase + atr * 0.55 * tfScale,
             };
 
             const entryMid = (entryZone.start + entryZone.end) / 2;
@@ -762,10 +783,13 @@ export function computeExecutionContext(
               vacuumZone.side === "BELOW" && vacuumZone.startPrice > 0
                 ? (vacuumZone.startPrice + vacuumZone.endPrice) / 2
                 : entryMid - R;
-            const tp1Price = Math.min(rawTp1Price, entryZone.start - atr * 0.3);
+            const tp1Price = Math.min(
+              rawTp1Price,
+              entryZone.start - atr * 0.3 * tfScale,
+            );
             tp1Zone = {
-              start: tp1Price - atr * 0.2,
-              end: tp1Price + atr * 0.2,
+              start: tp1Price - atr * 0.2 * tfScale,
+              end: tp1Price + atr * 0.2 * tfScale,
             };
             rMultiple = (entryMid - tp1Price) / R;
 
@@ -780,8 +804,8 @@ export function computeExecutionContext(
               const tp2Price = Math.max(tp2_3R, vacuumEnd);
               if (tp2Price < tp1Price) {
                 tp2Zone = {
-                  start: tp2Price - atr * 0.2,
-                  end: tp2Price + atr * 0.2,
+                  start: tp2Price - atr * 0.2 * tfScale,
+                  end: tp2Price + atr * 0.2 * tfScale,
                 };
                 rMultiple = (entryMid - tp2Price) / R;
               }
@@ -791,8 +815,8 @@ export function computeExecutionContext(
               vacuumEnd < tp1Price
             ) {
               tp2Zone = {
-                start: vacuumEnd - atr * 0.2,
-                end: vacuumEnd + atr * 0.2,
+                start: vacuumEnd - atr * 0.2 * tfScale,
+                end: vacuumEnd + atr * 0.2 * tfScale,
               };
               rMultiple = (entryMid - vacuumEnd) / R;
               structurallyLimited = true;
@@ -889,6 +913,7 @@ export function computeExecutionContext(
       pressure,
       pressureTrend,
       rangePosition,
+      tfScale,
     );
 
     if (reclaimSetup) {
@@ -933,16 +958,19 @@ export function computeExecutionContext(
             : upperStructure;
           const tp1Price = Math.max(tp1Raw, reclaimEntry.end + atr * 0.3);
           reclaimTp1 = {
-            start: tp1Price - atr * 0.2,
-            end: tp1Price + atr * 0.2,
+            start: tp1Price - atr * 0.2 * tfScale,
+            end: tp1Price + atr * 0.2 * tfScale,
           };
           reclaimR = (tp1Price - entryMidR) / R;
 
           const tp2Raw = isOutsideRangeLong
             ? upperStructure + rangeSize * 0.618
             : upperStructure + rangeSize * 0.25;
-          if (tp2Raw > tp1Price + atr * 0.3) {
-            reclaimTp2 = { start: tp2Raw - atr * 0.2, end: tp2Raw + atr * 0.2 };
+          if (tp2Raw > tp1Price + atr * 0.3 * tfScale) {
+            reclaimTp2 = {
+              start: tp2Raw - atr * 0.2 * tfScale,
+              end: tp2Raw + atr * 0.2 * tfScale,
+            };
             reclaimR = (tp2Raw - entryMidR) / R;
           }
         } else {
@@ -951,16 +979,19 @@ export function computeExecutionContext(
             : lowerStructure;
           const tp1Price = Math.min(tp1Raw, reclaimEntry.start - atr * 0.3);
           reclaimTp1 = {
-            start: tp1Price - atr * 0.2,
-            end: tp1Price + atr * 0.2,
+            start: tp1Price - atr * 0.2 * tfScale,
+            end: tp1Price + atr * 0.2 * tfScale,
           };
           reclaimR = (entryMidR - tp1Price) / R;
 
           const tp2Raw = isOutsideRangeShort
             ? lowerStructure - rangeSize * 0.618
             : lowerStructure - rangeSize * 0.25;
-          if (tp2Raw < tp1Price - atr * 0.3) {
-            reclaimTp2 = { start: tp2Raw - atr * 0.2, end: tp2Raw + atr * 0.2 };
+          if (tp2Raw < tp1Price - atr * 0.3 * tfScale) {
+            reclaimTp2 = {
+              start: tp2Raw - atr * 0.2 * tfScale,
+              end: tp2Raw + atr * 0.2 * tfScale,
+            };
             reclaimR = (entryMidR - tp2Raw) / R;
           }
         }

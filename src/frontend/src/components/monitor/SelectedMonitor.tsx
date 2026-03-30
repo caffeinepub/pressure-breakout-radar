@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { getCache } from "../../cache";
+import type { PersistentExecutionState } from "../../executionStateMachine";
 import { performCatchUp, startMonitorLoop } from "../../loops/monitorLoop";
 import {
   type RuntimeMode,
@@ -67,6 +68,8 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
   );
   const [stableBubbles, setStableBubbles] = useState<AggressionBubble[]>([]);
   const [execOverlayTs, setExecOverlayTs] = useState<number>(0);
+  const [stableMachineState, setStableMachineState] =
+    useState<PersistentExecutionState | null>(null);
 
   // ── Sync runtime mode from core ────────────────────────────────────────────
   useEffect(() => {
@@ -143,6 +146,7 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
     setStableExecCtx(null);
     setStableBubbles([]);
     setExecOverlayTs(0);
+    setStableMachineState(null);
 
     // Try frozen localStorage snapshot first (covers page reload after background)
     const frozen = loadFrozenSnapshot(symbol, timeframe);
@@ -164,6 +168,9 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
       if (restoreFrom.executionContext) {
         setStableExecCtx(restoreFrom.executionContext);
         setExecOverlayTs(restoreFrom.lastSuccessTime ?? 0);
+      }
+      if (restoreFrom.executionMachineState) {
+        setStableMachineState(restoreFrom.executionMachineState);
       }
       if (
         restoreFrom.aggressionBubbles &&
@@ -202,6 +209,9 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
         if (update.executionContext) {
           setStableExecCtx(update.executionContext);
           setExecOverlayTs(Date.now());
+        }
+        if (update.executionMachineState) {
+          setStableMachineState(update.executionMachineState);
         }
         if (update.aggressionBubbles && update.aggressionBubbles.length > 0) {
           setStableBubbles(update.aggressionBubbles);
@@ -414,12 +424,16 @@ export function SelectedMonitor({ symbol }: SelectedMonitorProps) {
               vacuumZone={snapshot?.vacuumZone}
               timeframe={timeframe}
               executionContext={stableExecCtx ?? undefined}
+              machineState={stableMachineState ?? undefined}
             />
           </div>
 
           {/* Execution Context */}
           <div className="px-4 mt-2">
-            <ExecutionContextBlock ctx={stableExecCtx} />
+            <ExecutionContextBlock
+              ctx={stableExecCtx}
+              machineState={stableMachineState}
+            />
           </div>
 
           {/* ── BUBBLE DEBUG PILL (collapsible) ── */}
