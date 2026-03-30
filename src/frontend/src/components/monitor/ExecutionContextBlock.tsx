@@ -243,10 +243,27 @@ function MachineStateBlock({ ms }: { ms: PersistentExecutionState }) {
         <div className="flex items-center gap-1.5">
           <MachineBadge state={state} />
           {ms.direction && <DirectionBadge dir={ms.direction} />}
-          {ms.rewardRisk > 0 && (
-            <span className="text-[9px] font-mono px-1.5 py-0.5 rounded border border-[oklch(0.78_0.13_195/20%)] text-radar-dim">
-              {ms.rewardRisk.toFixed(1)}R
-            </span>
+          {isBuilding ? (
+            // BUILDING: show zone conflict badge or dimmer projected RR
+            ms.rrDisplayMode === "ZONE_CONFLICT" ? (
+              <span className="text-[9px] font-bold font-mono px-1.5 py-0.5 rounded border text-amber-400 border-amber-400/30 bg-amber-400/8">
+                ZONE CONFLICT
+              </span>
+            ) : ms.rrDisplayMode === "PROVISIONAL" ? (
+              <span className="text-[9px] font-mono px-1.5 py-0.5 rounded border border-white/10 text-radar-dim/50">
+                PROVISIONAL
+              </span>
+            ) : ms.projectedRR != null && ms.projectedRR > 0 ? (
+              <span className="text-[9px] font-mono px-1.5 py-0.5 rounded border border-white/10 text-radar-dim/50">
+                ~{ms.projectedRR.toFixed(1)}R
+              </span>
+            ) : null
+          ) : (
+            ms.rewardRisk > 0 && (
+              <span className="text-[9px] font-mono px-1.5 py-0.5 rounded border border-[oklch(0.78_0.13_195/20%)] text-radar-dim">
+                {ms.rewardRisk.toFixed(1)}R
+              </span>
+            )
           )}
         </div>
         <span className="text-[8px] font-mono text-radar-dim/50">
@@ -423,9 +440,26 @@ function MachineStateBlock({ ms }: { ms: PersistentExecutionState }) {
       {/* BUILDING — faint projected zones */}
       {showFaintZones && (
         <div className="px-2.5 pb-2.5 space-y-1.5 border-t border-white/5 pt-1.5 opacity-60">
-          <div className="text-[8px] font-mono text-radar-dim/50 uppercase tracking-wider mb-1">
-            PROJECTED ZONES (FORMING)
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <div className="text-[8px] font-mono text-radar-dim/50 uppercase tracking-wider">
+              PROJECTED ZONES (FORMING)
+            </div>
+            {ms.rrDisplayMode === "ZONE_CONFLICT" && (
+              <span className="text-[7px] font-mono text-amber-400/70 uppercase tracking-wider">
+                ZONES NOT CLEAN YET
+              </span>
+            )}
+            {ms.rrDisplayMode === "NUMERIC" && (
+              <span className="text-[7px] font-mono text-radar-dim/40 uppercase tracking-wider">
+                projected only
+              </span>
+            )}
           </div>
+          {ms.rrDisplayMode === "ZONE_CONFLICT" && (
+            <div className="text-[8px] font-mono text-amber-400/60 py-0.5 px-1.5 rounded bg-amber-400/6 border border-amber-400/15 mb-1">
+              ENTRY / SL STILL FORMING
+            </div>
+          )}
           <div className="flex items-center justify-between gap-2">
             <span className="text-[9px] font-mono text-radar-dim">ENTRY</span>
             <span className="text-[10px] font-mono text-radar-dim/70 text-right">
@@ -566,6 +600,50 @@ function MachineDebugBlock({ ms }: { ms: PersistentExecutionState }) {
             <span className="text-radar-dim/60">Block</span>
             <span className="text-red-400 font-bold text-[7px]">
               {ms.readyBlockReason.replace(/_/g, " ")}
+            </span>
+          </>
+        )}
+        {ms.separationTooSmall !== undefined && (
+          <>
+            <span className="text-radar-dim/60">Sep. too small</span>
+            <span
+              className={
+                ms.separationTooSmall
+                  ? "text-red-400 font-bold"
+                  : "text-radar-green"
+              }
+            >
+              {ms.separationTooSmall ? "YES ⛔" : "NO ✓"}
+            </span>
+          </>
+        )}
+        {ms.projectedRR !== undefined && (
+          <>
+            <span className="text-radar-dim/60">Projected RR</span>
+            <span
+              className={
+                ms.projectedRR != null && ms.projectedRR < 1.8
+                  ? "text-amber-400"
+                  : "text-radar-dim"
+              }
+            >
+              {ms.projectedRR != null ? `${ms.projectedRR.toFixed(2)}R` : "—"}
+            </span>
+          </>
+        )}
+        {ms.rrDisplayMode && (
+          <>
+            <span className="text-radar-dim/60">RR display</span>
+            <span
+              className={
+                ms.rrDisplayMode === "ZONE_CONFLICT"
+                  ? "text-amber-400 font-bold"
+                  : ms.rrDisplayMode === "PROVISIONAL"
+                    ? "text-radar-dim/60"
+                    : "text-radar-green"
+              }
+            >
+              {ms.rrDisplayMode}
             </span>
           </>
         )}

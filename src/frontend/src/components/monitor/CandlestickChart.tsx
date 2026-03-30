@@ -685,18 +685,17 @@ export function CandlestickChart({
     ) {
       bctx.save();
       bctx.globalAlpha = alpha;
-      // Softer glow — suggest aggression without covering the chart
-      bctx.shadowBlur = r * 0.7;
+      bctx.shadowBlur = r * 0.5;
       bctx.shadowColor =
-        side === "BUY" ? "rgba(34,197,94,0.35)" : "rgba(239,68,68,0.35)";
+        side === "BUY" ? "rgba(34,197,94,0.25)" : "rgba(239,68,68,0.25)";
       const gradient = bctx.createRadialGradient(bx, by, 0, bx, by, r);
       if (side === "BUY") {
-        gradient.addColorStop(0, "rgba(34,197,94,0.48)");
-        gradient.addColorStop(0.55, "rgba(34,197,94,0.18)");
+        gradient.addColorStop(0, "rgba(34,197,94,0.45)");
+        gradient.addColorStop(0.55, "rgba(34,197,94,0.15)");
         gradient.addColorStop(1, "rgba(34,197,94,0.02)");
       } else {
-        gradient.addColorStop(0, "rgba(239,68,68,0.48)");
-        gradient.addColorStop(0.55, "rgba(239,68,68,0.18)");
+        gradient.addColorStop(0, "rgba(239,68,68,0.45)");
+        gradient.addColorStop(0.55, "rgba(239,68,68,0.15)");
         gradient.addColorStop(1, "rgba(239,68,68,0.02)");
       }
       bctx.beginPath();
@@ -714,16 +713,47 @@ export function CandlestickChart({
     if (bubbles.length > 0) {
       const protectRight = W - rightMargin + 6;
 
-      // Sort weakest first, strongest last (strongest renders on top)
-      const sortedBubbles = [...bubbles].sort((a, b) => a.radius - b.radius);
+      // Compute age fade range
+      const bubbleTimes = bubbles.map((b) => b.candleOpenTime);
+      const newestBubbleTime = Math.max(...bubbleTimes);
+      const oldestBubbleTime = Math.min(...bubbleTimes);
+      const bubbleTimeSpan = Math.max(newestBubbleTime - oldestBubbleTime, 1);
 
-      // Track placed bubble positions for clustering
+      function getAgeFade(t: number): number {
+        const ageFrac = (newestBubbleTime - t) / bubbleTimeSpan;
+        if (ageFrac < 0.25) return 1.0;
+        if (ageFrac < 0.5) return 0.85;
+        if (ageFrac < 0.75) return 0.65;
+        return 0.42;
+      }
+
+      // Sort strongest-first so weaker overlapping bubbles step back
+      const sortedBubbles = [...bubbles].sort(
+        (a, b) => b.strength - a.strength,
+      );
+
+      // Track placed positions to suppress overlapping weaker bubbles
       const placedPositions: {
         x: number;
         y: number;
         r: number;
         side: string;
+        strength: number;
       }[] = [];
+
+      // Compute execution label screen Y positions for proximity protection
+      const execLabelYs: number[] = [];
+      if (hasValidExec) {
+        const labelZones = [zoneEntry, zoneSl, zoneTp1, zoneTp2].filter(
+          Boolean,
+        ) as { start: number; end: number }[];
+        for (const zone of labelZones) {
+          const mid = (zone.start + zone.end) / 2;
+          const y = toY(mid);
+          if (y >= topMargin && y <= topMargin + chartH) execLabelYs.push(y);
+        }
+      }
+      const labelChipX = leftMargin + chartW - 2;
 
       for (const bubble of sortedBubbles) {
         const ci = visible.findIndex(
@@ -733,33 +763,28 @@ export function CandlestickChart({
         let bx = toX(ci);
         const r = bubble.radius;
 
-        // Clamp bx to canvas bounds
         bx = Math.max(leftMargin + r + 2, Math.min(bx, protectRight - r - 2));
 
-        // Anchor BUY to candle body lower zone, SELL to candle body upper zone
         const candle = visible[ci];
         let rawBy: number;
         if (bubble.side === "BUY") {
-          // Anchor near lower body / wick midpoint (bullish defense zone)
           const bodyLow = Math.min(candle.open, candle.close);
           const wickLow = candle.low;
           const anchorPrice = bodyLow * 0.65 + wickLow * 0.35;
           rawBy = toY(anchorPrice);
         } else {
-          // Anchor near upper body / wick midpoint (bearish hit zone)
           const bodyHigh = Math.max(candle.open, candle.close);
           const wickHigh = candle.high;
           const anchorPrice = bodyHigh * 0.65 + wickHigh * 0.35;
           rawBy = toY(anchorPrice);
         }
 
-        // Clamp by to chart canvas bounds
         let finalBy = Math.max(
           topMargin + r + 2,
           Math.min(rawBy, topMargin + chartH - r - 2),
         );
 
-        // Slight price-line avoidance (reduced drift)
+        // Slight price-line avoidance
         const nearPriceLine = Math.abs(finalBy - lpY) < r + 6;
         if (nearPriceLine) {
           const shift = r + 6;
@@ -770,28 +795,84 @@ export function CandlestickChart({
           }
         }
 
-        // Determine if this bubble is a minor in a cluster (same side, close proximity)
-        let isMinor = false;
+        // Check if a stronger same-side bubble is already placed nearby — weaker steps back
+        let dominanceAlphaScale = 1.0;
+        let isOverlappingStronger = false;
         for (const placed of placedPositions) {
           if (placed.side !== bubble.side) continue;
           const dist = Math.sqrt(
             (bx - placed.x) ** 2 + (finalBy - placed.y) ** 2,
           );
-          if (dist < r + placed.r + 10) {
-            isMinor = true;
+          if (dist < r + placed.r + 8) {
+            isOverlappingStronger = true;
+            dominanceAlphaScale = 0.4;
             break;
           }
         }
 
-        // Minor bubbles in a cluster get reduced alpha; dominant stays full
-        const bubbleAlpha = isMinor ? 0.8 * 0.65 : 0.8;
-        drawBubble(ctx, bx, finalBy, r, bubble.side, bubbleAlpha);
+        const ageFade = getAgeFade(bubble.candleOpenTime);
+        let bubbleAlpha = 0.85 * ageFade * dominanceAlphaScale;
 
-        placedPositions.push({ x: bx, y: finalBy, r, side: bubble.side });
+        // Execution label proximity: reduce glow + alpha near label chips
+        let nearLabel = false;
+        for (const labelY of execLabelYs) {
+          const distToLabel = Math.sqrt(
+            (bx - labelChipX) ** 2 + (finalBy - labelY) ** 2,
+          );
+          if (distToLabel < r + 20) {
+            nearLabel = true;
+            break;
+          }
+        }
+        if (nearLabel) bubbleAlpha *= 0.7;
+
+        if (nearLabel) {
+          ctx.save();
+          ctx.globalAlpha = bubbleAlpha;
+          ctx.shadowBlur = r * 0.3;
+          ctx.shadowColor =
+            bubble.side === "BUY"
+              ? "rgba(34,197,94,0.20)"
+              : "rgba(239,68,68,0.20)";
+          const g2 = ctx.createRadialGradient(bx, finalBy, 0, bx, finalBy, r);
+          if (bubble.side === "BUY") {
+            g2.addColorStop(0, "rgba(34,197,94,0.45)");
+            g2.addColorStop(0.55, "rgba(34,197,94,0.15)");
+            g2.addColorStop(1, "rgba(34,197,94,0.02)");
+          } else {
+            g2.addColorStop(0, "rgba(239,68,68,0.45)");
+            g2.addColorStop(0.55, "rgba(239,68,68,0.15)");
+            g2.addColorStop(1, "rgba(239,68,68,0.02)");
+          }
+          ctx.beginPath();
+          ctx.arc(bx, finalBy, r, 0, Math.PI * 2);
+          ctx.fillStyle = g2;
+          ctx.fill();
+          ctx.shadowBlur = 0;
+          ctx.strokeStyle =
+            bubble.side === "BUY"
+              ? "rgba(34,197,94,0.45)"
+              : "rgba(239,68,68,0.45)";
+          ctx.lineWidth = 0.7;
+          ctx.stroke();
+          ctx.restore();
+        } else {
+          drawBubble(ctx, bx, finalBy, r, bubble.side, bubbleAlpha);
+        }
+
+        if (!isOverlappingStronger) {
+          placedPositions.push({
+            x: bx,
+            y: finalBy,
+            r,
+            side: bubble.side,
+            strength: bubble.strength,
+          });
+        }
       }
     }
 
-    // === SECOND PASS: Execution zone label chips (on top of bubbles) ===
+    // === SECOND PASS    // === SECOND PASS: Execution zone label chips (on top of bubbles) ===
     if (hasValidExec) {
       const isLong = isLongDir;
 

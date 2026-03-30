@@ -26,6 +26,8 @@ export type InvalidationReason =
   | "DATA_TIMEOUT_CONFIRMED"
   | null;
 
+export type RRDisplayMode = "NUMERIC" | "PROVISIONAL" | "ZONE_CONFLICT";
+
 export interface PersistentExecutionState {
   // Core state
   state: ExecutionMachineState;
@@ -72,6 +74,11 @@ export interface PersistentExecutionState {
     | "SEPARATION_TOO_SMALL"
     | "RR_TOO_LOW"
     | null;
+
+  // BUILDING RR display fields (patch: zone conflict sanity)
+  separationTooSmall?: boolean;
+  projectedRR?: number;
+  rrDisplayMode?: RRDisplayMode;
 }
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
@@ -171,13 +178,13 @@ function computeRR(
 
 interface ZoneSeparationResult {
   overlapExists: boolean;
+  separationTooSmall: boolean;
   separationDistance: number;
   minimumRequiredSeparation: number;
 }
 
 /**
  * Check overlap and minimum separation between entry and SL zones.
- * Returns overlapExists=true if zones overlap or are too close.
  */
 function checkZoneSeparation(
   entryZone: ExecutionZone,
@@ -203,7 +210,26 @@ function checkZoneSeparation(
     tinyValue,
   );
 
-  return { overlapExists, separationDistance, minimumRequiredSeparation };
+  const separationTooSmall = separationDistance < minimumRequiredSeparation;
+
+  return {
+    overlapExists,
+    separationTooSmall,
+    separationDistance,
+    minimumRequiredSeparation,
+  };
+}
+
+/**
+ * Derive rrDisplayMode for BUILDING state.
+ * ZONE_CONFLICT when overlap or separation issue; NUMERIC otherwise.
+ */
+function computeRRDisplayMode(
+  overlapExists: boolean,
+  separationTooSmall: boolean,
+): RRDisplayMode {
+  if (overlapExists || separationTooSmall) return "ZONE_CONFLICT";
+  return "NUMERIC";
 }
 
 /**
@@ -338,6 +364,7 @@ interface ExtractedSetup {
 
 interface ExtractedSetupDebug {
   overlapExists: boolean;
+  separationTooSmall: boolean;
   separationDistance: number;
   minimumRequiredSeparation: number;
   conservativeRR: number;
@@ -378,7 +405,7 @@ function extractValidSetup(
     | null = null;
   if (sep.overlapExists) {
     readyBlockReason = "OVERLAP_BLOCK";
-  } else if (sep.separationDistance < sep.minimumRequiredSeparation) {
+  } else if (sep.separationTooSmall) {
     readyBlockReason = "SEPARATION_TOO_SMALL";
   } else if (rr < MIN_READY_RR) {
     readyBlockReason = "RR_TOO_LOW";
@@ -393,6 +420,7 @@ function extractValidSetup(
     rr,
     isValid: readyBlockReason === null,
     overlapExists: sep.overlapExists,
+    separationTooSmall: sep.separationTooSmall,
     separationDistance: sep.separationDistance,
     minimumRequiredSeparation: sep.minimumRequiredSeparation,
     conservativeRR: rr,
@@ -590,7 +618,8 @@ export function advanceExecutionStateMachine(
       next.tp1Zone = ctx.tp1Zone;
       next.tp2Zone = ctx.tp2Zone ?? null;
       next.rewardRisk = ctx.rMultiple ?? 0;
-      // Update overlap/separation debug fields while BUILDING
+
+      // ── BUILDING zone conflict detection (patch) ────────────────────────
       if (ctx.entryZone && ctx.slZone) {
         const dir = (
           ctx.entryBias !== "NEUTRAL" ? ctx.entryBias : persisted.direction
@@ -601,16 +630,25 @@ export function advanceExecutionStateMachine(
           currentPrice,
         );
         next.overlapExists = sepCheck.overlapExists;
+        next.separationTooSmall = sepCheck.separationTooSmall;
         next.separationDistance = sepCheck.separationDistance;
         next.minimumRequiredSeparation = sepCheck.minimumRequiredSeparation;
         if (dir && ctx.tp1Zone) {
-          next.conservativeRR = computeRR(
-            dir,
-            ctx.entryZone,
-            ctx.slZone,
-            ctx.tp1Zone,
-          );
+          const projRR = computeRR(dir, ctx.entryZone, ctx.slZone, ctx.tp1Zone);
+          next.conservativeRR = projRR;
+          next.projectedRR = projRR;
         }
+        // Determine rrDisplayMode for BUILDING
+        next.rrDisplayMode = computeRRDisplayMode(
+          sepCheck.overlapExists,
+          sepCheck.separationTooSmall,
+        );
+      } else {
+        // No zones yet — treat as provisional
+        next.overlapExists = undefined;
+        next.separationTooSmall = undefined;
+        next.projectedRR = undefined;
+        next.rrDisplayMode = "PROVISIONAL";
       }
 
       const setup = extractValidSetup(ctx, currentPrice);
@@ -639,18 +677,27 @@ export function advanceExecutionStateMachine(
           rewardRisk: setup.rr,
           setupId,
           overlapExists: setup.overlapExists,
+          separationTooSmall: setup.separationTooSmall,
           separationDistance: setup.separationDistance,
           minimumRequiredSeparation: setup.minimumRequiredSeparation,
           conservativeRR: setup.conservativeRR,
+          projectedRR: setup.rr,
+          rrDisplayMode: "NUMERIC", // READY always uses numeric RR
           readyBlockReason: null,
         };
       } else if (setup && !setup.isValid) {
         // Setup detected but blocked from READY — store reason for debug
         next.readyBlockReason = setup.readyBlockReason;
         next.overlapExists = setup.overlapExists;
+        next.separationTooSmall = setup.separationTooSmall;
         next.separationDistance = setup.separationDistance;
         next.minimumRequiredSeparation = setup.minimumRequiredSeparation;
         next.conservativeRR = setup.conservativeRR;
+        next.projectedRR = setup.conservativeRR;
+        next.rrDisplayMode = computeRRDisplayMode(
+          setup.overlapExists,
+          setup.separationTooSmall,
+        );
       } else if (!isConditionsBuilding(ctx)) {
         // Conditions dissolved — only go back to NO_SETUP if we haven't built up yet
         if (buildingCycles < tfConstants.MIN_BUILDING_CYCLES) {

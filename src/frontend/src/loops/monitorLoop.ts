@@ -109,10 +109,10 @@ function computeRollingTrend(history: number[], next: number): TrendDirection {
 }
 
 function getBubbleRadius(strength: number): number {
-  if (strength >= 75) return 22;
-  if (strength >= 50) return 18;
-  if (strength >= 25) return 14;
-  return 10;
+  if (strength >= 75) return 20; // extreme
+  if (strength >= 50) return 16; // strong
+  if (strength >= 25) return 12; // medium
+  return 8; // weak
 }
 
 interface BuildResult {
