@@ -61,6 +61,17 @@ export interface PersistentExecutionState {
   // Debug fields
   source: "LIVE" | "LAST_KNOWN_GOOD" | "STALE_HOLD";
   stateAgeMs: number;
+
+  // Overlap guard debug fields (set when computing READY eligibility)
+  overlapExists?: boolean;
+  separationDistance?: number;
+  minimumRequiredSeparation?: number;
+  conservativeRR?: number;
+  readyBlockReason?:
+    | "OVERLAP_BLOCK"
+    | "SEPARATION_TOO_SMALL"
+    | "RR_TOO_LOW"
+    | null;
 }
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
@@ -139,15 +150,60 @@ function computeRR(
   slZone: ExecutionZone,
   tp1Zone: ExecutionZone,
 ): number {
+  // Conservative RR: worst-edge risk, nearest-edge reward
+  const entryMid = zoneMid(entryZone);
+  const tinyValue = entryMid * 0.0001;
+
+  // Risk: entry mid to WORST invalidation edge
+  const slLowest = Math.min(slZone.start, slZone.end);
+  const slHighest = Math.max(slZone.start, slZone.end);
+  const riskDistance =
+    direction === "LONG" ? entryMid - slLowest : slHighest - entryMid;
+
+  // Reward: entry mid to NEAREST TP edge
+  const tp1Lowest = Math.min(tp1Zone.start, tp1Zone.end);
+  const tp1Highest = Math.max(tp1Zone.start, tp1Zone.end);
+  const rewardToTP1 =
+    direction === "LONG" ? tp1Lowest - entryMid : entryMid - tp1Highest;
+
+  return rewardToTP1 / Math.max(riskDistance, tinyValue);
+}
+
+interface ZoneSeparationResult {
+  overlapExists: boolean;
+  separationDistance: number;
+  minimumRequiredSeparation: number;
+}
+
+/**
+ * Check overlap and minimum separation between entry and SL zones.
+ * Returns overlapExists=true if zones overlap or are too close.
+ */
+function checkZoneSeparation(
+  entryZone: ExecutionZone,
+  slZone: ExecutionZone,
+  refPrice: number,
+): ZoneSeparationResult {
+  const tinyValue = refPrice * 0.0001;
+
+  // Hard overlap: zones share any price range
+  const overlapExists =
+    entryZone.end >= slZone.start && entryZone.start <= slZone.end;
+
+  // Midpoint separation
   const entryMid = zoneMid(entryZone);
   const slMid = zoneMid(slZone);
-  const tp1Mid = zoneMid(tp1Zone);
-  const R =
-    direction === "LONG"
-      ? Math.max(entryMid - slMid, entryMid * 0.001)
-      : Math.max(slMid - entryMid, entryMid * 0.001);
-  const reward = direction === "LONG" ? tp1Mid - entryMid : entryMid - tp1Mid;
-  return R > 0 ? reward / R : 0;
+  const separationDistance = Math.abs(entryMid - slMid);
+
+  // Minimum required separation: at least half the wider zone
+  const entryWidth = Math.abs(entryZone.end - entryZone.start);
+  const slWidth = Math.abs(slZone.end - slZone.start);
+  const minimumRequiredSeparation = Math.max(
+    0.5 * Math.max(entryWidth, slWidth),
+    tinyValue,
+  );
+
+  return { overlapExists, separationDistance, minimumRequiredSeparation };
 }
 
 /**
@@ -280,7 +336,22 @@ interface ExtractedSetup {
   isValid: boolean;
 }
 
-function extractValidSetup(ctx: ExecutionContext): ExtractedSetup | null {
+interface ExtractedSetupDebug {
+  overlapExists: boolean;
+  separationDistance: number;
+  minimumRequiredSeparation: number;
+  conservativeRR: number;
+  readyBlockReason:
+    | "OVERLAP_BLOCK"
+    | "SEPARATION_TOO_SMALL"
+    | "RR_TOO_LOW"
+    | null;
+}
+
+function extractValidSetup(
+  ctx: ExecutionContext,
+  refPrice?: number,
+): (ExtractedSetup & ExtractedSetupDebug) | null {
   const validStates = [
     "VALID_LONG",
     "VALID_SHORT",
@@ -296,7 +367,23 @@ function extractValidSetup(ctx: ExecutionContext): ExtractedSetup | null {
       ? "LONG"
       : "SHORT";
 
+  const price = refPrice ?? zoneMid(ctx.entryZone);
+  const sep = checkZoneSeparation(ctx.entryZone, ctx.slZone, price);
   const rr = computeRR(direction, ctx.entryZone, ctx.slZone, ctx.tp1Zone);
+
+  let readyBlockReason:
+    | "OVERLAP_BLOCK"
+    | "SEPARATION_TOO_SMALL"
+    | "RR_TOO_LOW"
+    | null = null;
+  if (sep.overlapExists) {
+    readyBlockReason = "OVERLAP_BLOCK";
+  } else if (sep.separationDistance < sep.minimumRequiredSeparation) {
+    readyBlockReason = "SEPARATION_TOO_SMALL";
+  } else if (rr < MIN_READY_RR) {
+    readyBlockReason = "RR_TOO_LOW";
+  }
+
   return {
     direction,
     entryZone: ctx.entryZone,
@@ -304,7 +391,12 @@ function extractValidSetup(ctx: ExecutionContext): ExtractedSetup | null {
     tp1Zone: ctx.tp1Zone,
     tp2Zone: ctx.tp2Zone ?? null,
     rr,
-    isValid: rr >= MIN_READY_RR,
+    isValid: readyBlockReason === null,
+    overlapExists: sep.overlapExists,
+    separationDistance: sep.separationDistance,
+    minimumRequiredSeparation: sep.minimumRequiredSeparation,
+    conservativeRR: rr,
+    readyBlockReason,
   };
 }
 
@@ -498,8 +590,30 @@ export function advanceExecutionStateMachine(
       next.tp1Zone = ctx.tp1Zone;
       next.tp2Zone = ctx.tp2Zone ?? null;
       next.rewardRisk = ctx.rMultiple ?? 0;
+      // Update overlap/separation debug fields while BUILDING
+      if (ctx.entryZone && ctx.slZone) {
+        const dir = (
+          ctx.entryBias !== "NEUTRAL" ? ctx.entryBias : persisted.direction
+        ) as "LONG" | "SHORT" | null;
+        const sepCheck = checkZoneSeparation(
+          ctx.entryZone,
+          ctx.slZone,
+          currentPrice,
+        );
+        next.overlapExists = sepCheck.overlapExists;
+        next.separationDistance = sepCheck.separationDistance;
+        next.minimumRequiredSeparation = sepCheck.minimumRequiredSeparation;
+        if (dir && ctx.tp1Zone) {
+          next.conservativeRR = computeRR(
+            dir,
+            ctx.entryZone,
+            ctx.slZone,
+            ctx.tp1Zone,
+          );
+        }
+      }
 
-      const setup = extractValidSetup(ctx);
+      const setup = extractValidSetup(ctx, currentPrice);
 
       if (setup?.isValid && buildingCycles >= tfConstants.MIN_BUILDING_CYCLES) {
         // Conditions met — transition to READY
@@ -524,7 +638,19 @@ export function advanceExecutionStateMachine(
           tp2Zone: setup.tp2Zone,
           rewardRisk: setup.rr,
           setupId,
+          overlapExists: setup.overlapExists,
+          separationDistance: setup.separationDistance,
+          minimumRequiredSeparation: setup.minimumRequiredSeparation,
+          conservativeRR: setup.conservativeRR,
+          readyBlockReason: null,
         };
+      } else if (setup && !setup.isValid) {
+        // Setup detected but blocked from READY — store reason for debug
+        next.readyBlockReason = setup.readyBlockReason;
+        next.overlapExists = setup.overlapExists;
+        next.separationDistance = setup.separationDistance;
+        next.minimumRequiredSeparation = setup.minimumRequiredSeparation;
+        next.conservativeRR = setup.conservativeRR;
       } else if (!isConditionsBuilding(ctx)) {
         // Conditions dissolved — only go back to NO_SETUP if we haven't built up yet
         if (buildingCycles < tfConstants.MIN_BUILDING_CYCLES) {
@@ -561,7 +687,7 @@ export function advanceExecutionStateMachine(
       }
 
       // Check if a fresh setup requires a new setupId (structure changed materially)
-      const setup = extractValidSetup(ctx);
+      const setup = extractValidSetup(ctx, currentPrice);
       if (setup && persisted.entryZone && persisted.slZone) {
         const materialChange =
           setup.direction !== persisted.direction ||

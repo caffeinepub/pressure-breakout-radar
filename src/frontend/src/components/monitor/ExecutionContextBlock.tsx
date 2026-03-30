@@ -516,6 +516,59 @@ function MachineDebugBlock({ ms }: { ms: PersistentExecutionState }) {
         )}
         <span className="text-radar-dim/60">Version</span>
         <span className="text-radar-dim">{ms.version}</span>
+
+        {/* Overlap / separation / conservative RR */}
+        {ms.overlapExists !== undefined && (
+          <>
+            <span className="text-radar-dim/60">Overlap</span>
+            <span
+              className={
+                ms.overlapExists ? "text-red-400 font-bold" : "text-radar-green"
+              }
+            >
+              {ms.overlapExists ? "YES ⛔" : "NO ✓"}
+            </span>
+          </>
+        )}
+        {ms.separationDistance !== undefined && (
+          <>
+            <span className="text-radar-dim/60">Separation</span>
+            <span
+              className={
+                ms.separationDistance !== undefined &&
+                ms.minimumRequiredSeparation !== undefined &&
+                ms.separationDistance < ms.minimumRequiredSeparation
+                  ? "text-amber-400"
+                  : "text-radar-dim"
+              }
+            >
+              {ms.separationDistance?.toFixed(4)} / min{" "}
+              {ms.minimumRequiredSeparation?.toFixed(4)}
+            </span>
+          </>
+        )}
+        {ms.conservativeRR !== undefined && (
+          <>
+            <span className="text-radar-dim/60">Consv. RR</span>
+            <span
+              className={
+                ms.conservativeRR !== undefined && ms.conservativeRR < 1.8
+                  ? "text-amber-400"
+                  : "text-radar-green"
+              }
+            >
+              {ms.conservativeRR?.toFixed(2)}R
+            </span>
+          </>
+        )}
+        {ms.readyBlockReason && (
+          <>
+            <span className="text-radar-dim/60">Block</span>
+            <span className="text-red-400 font-bold text-[7px]">
+              {ms.readyBlockReason.replace(/_/g, " ")}
+            </span>
+          </>
+        )}
       </div>
     </div>
   );
